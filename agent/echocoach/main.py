@@ -34,11 +34,7 @@ RIME_MODEL = "coda"
 RIME_VOICE = "celeste"
 RIME_LANGUAGE = "en"
 
-COACHING_GREETING = (
-    "Welcome to EchoCoach! I'm your real-time speaking coach. "
-    "I'll listen while you speak and help you improve your pronunciation, "
-    "pace, and fluency. Let's get started — try reading the sentence on screen."
-)
+COACHING_GREETING = "Welcome to EchoCoach! Speak and I will show your words live."
 
 
 class EchoCoachAgent(Agent):
@@ -85,9 +81,15 @@ async def echocoach_session(ctx: agents.JobContext):
         stt=deepgram.STT(
             model="nova-3",
             language="en",
+            filler_words=True,
+            interim_results=True,
+            punctuate=True,
         ),
         # --- VAD: Silero for turn detection ---
-        vad=silero.VAD.load(),
+        vad=silero.VAD.load(
+            activation_threshold=0.35,
+            prefix_padding_duration=0.5,
+        ),
     )
 
     # Start the session — connects agent to the room
