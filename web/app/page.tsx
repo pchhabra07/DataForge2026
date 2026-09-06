@@ -1,15 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
   useConnectionState,
   useRoomContext,
+  useTranscriptions,
   useVoiceAssistant,
   BarVisualizer,
 } from "@livekit/components-react";
-import { ConnectionState } from "livekit-client";
+import { ConnectionState, RoomEvent } from "livekit-client";
+import type { Participant, TranscriptionSegment } from "livekit-client";
+import { summarize, upsertLine } from "./lib/metrics";
+import type { TranscriptLine } from "./lib/metrics";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -125,7 +129,7 @@ export default function Home() {
             onDisconnected={handleDisconnect}
             style={{ width: "100%", maxWidth: 800 }}
           >
-            <SessionView onDisconnect={handleDisconnect} />
+            <SessionView onDisconnect={handleDisconnect} userIdentity={connectionDetails.identity} />
             <RoomAudioRenderer />
           </LiveKitRoom>
         )}
@@ -150,12 +154,66 @@ export default function Home() {
 // ---------------------------------------------------------------------------
 // Session View (inside LiveKitRoom context)
 // ---------------------------------------------------------------------------
-function SessionView({ onDisconnect }: { onDisconnect: () => void }) {
+function SessionView({
+  onDisconnect,
+  userIdentity,
+}: {
+  onDisconnect: () => void;
+  userIdentity: string;
+}) {
   const connectionState = useConnectionState();
   const room = useRoomContext();
   const { state: agentState, audioTrack: agentAudioTrack } = useVoiceAssistant();
+  const transcriptions = useTranscriptions({
+    participantIdentities: [userIdentity],
+  });
+  const [fallbackLines, setFallbackLines] = useState<TranscriptLine[]>([]);
+  const primaryLines = useMemo(
+    () =>
+      transcriptions.map((entry) => ({
+        id: entry.streamInfo.id,
+        text: entry.text,
+        isFinal:
+          entry.streamInfo.attributes?.["lk.transcription_final"] === "true",
+        receivedAt: entry.streamInfo.timestamp,
+      })),
+    [transcriptions]
+  );
+  const usePrimary = primaryLines.length > 0;
+  const lines = usePrimary ? primaryLines.slice(-50) : fallbackLines;
+  const summary = useMemo(() => summarize(lines), [lines]);
 
-  // Track whether the agent is speaking
+  useEffect(() => {
+    if (usePrimary) {
+      return;
+    }
+    const handler = (
+      segments: TranscriptionSegment[],
+      participant?: Participant
+    ) => {
+      if (participant && participant.identity !== userIdentity) {
+        return;
+      }
+      setFallbackLines((prev) => {
+        let next = prev;
+        for (const seg of segments) {
+          next = upsertLine(next, {
+            id: seg.id,
+            text: seg.text,
+            isFinal: seg.final,
+            receivedAt: Date.now(),
+          });
+        }
+        return next;
+      });
+    };
+    room.on(RoomEvent.TranscriptionReceived, handler);
+    return () => {
+      room.off(RoomEvent.TranscriptionReceived, handler);
+    };
+  }, [room, userIdentity, usePrimary]);
+
+  const visibleLines = lines.slice(-6);
   const isSpeaking = agentState === "speaking";
 
   return (
@@ -194,6 +252,60 @@ function SessionView({ onDisconnect }: { onDisconnect: () => void }) {
             <span>Coach is speaking — listen carefully</span>
           )}
         </div>
+      </div>
+
+      <div className="glass-card transcript-panel">
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: 12,
+          }}
+        >
+          <span
+            style={{
+              fontSize: 12,
+              fontWeight: 600,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              color: "var(--text-secondary)",
+            }}
+          >
+            Live Transcript
+          </span>
+          <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+            {summary.wpm} WPM · {summary.fillers}{" "}
+            {summary.fillers === 1 ? "filler" : "fillers"}
+          </span>
+        </div>
+        {visibleLines.length === 0 ? (
+          <p style={{ color: "var(--text-muted)", fontSize: 14 }}>
+            Speak and your words appear here
+          </p>
+        ) : (
+          <div
+            style={{ display: "flex", flexDirection: "column", gap: 6 }}
+          >
+            {visibleLines.map((line) => (
+              <p
+                key={line.id}
+                style={{
+                  fontSize: 14,
+                  lineHeight: 1.5,
+                  margin: 0,
+                  color: line.isFinal
+                    ? "var(--text-primary)"
+                    : "var(--text-secondary)",
+                  opacity: line.isFinal ? 1 : 0.55,
+                  fontStyle: line.isFinal ? "normal" : "italic",
+                }}
+              >
+                {line.text}
+              </p>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* User Input */}
