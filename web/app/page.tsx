@@ -119,6 +119,8 @@ export default function Home() {
           <LiveKitRoom
             serverUrl={connectionDetails.url}
             token={connectionDetails.token}
+            audio={true}
+            video={false}
             connectOptions={{ autoSubscribe: true }}
             onDisconnected={handleDisconnect}
             style={{ width: "100%", maxWidth: 800 }}

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LiveKit Token Generator — Local Development
+LiveKit Token Generator - Local Development
 
 Generates a JWT access token for connecting to a LiveKit room.
 Used by the web client during local development.
@@ -31,7 +31,9 @@ def generate_token(room: str, identity: str) -> str:
     api_secret = os.environ.get("LIVEKIT_API_SECRET")
 
     if not api_key or not api_secret:
-        print("❌ LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set in .env.local")
+        print(
+            "[ERROR] LIVEKIT_API_KEY and LIVEKIT_API_SECRET must be set in .env.local"
+        )
         sys.exit(1)
 
     token = AccessToken(api_key, api_secret)
@@ -59,12 +61,17 @@ def main():
     jwt = generate_token(args.room, args.identity)
 
     if args.json:
-        print(json.dumps({
-            "token": jwt,
-            "room": args.room,
-            "identity": args.identity,
-            "url": os.environ.get("LIVEKIT_URL", ""),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "token": jwt,
+                    "room": args.room,
+                    "identity": args.identity,
+                    "url": os.environ.get("LIVEKIT_URL", ""),
+                },
+                indent=2,
+            )
+        )
     else:
         print(f"Room:     {args.room}")
         print(f"Identity: {args.identity}")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Rime Preflight Check — Phase 0 Submission Gate
+Rime Preflight Check - Phase 0 Submission Gate
 
 Confirms that the exact Rime model, voice, language, and endpoint work
 against the live Rime API before any feature code is written.
@@ -11,8 +11,8 @@ Usage:
 Requires RIME_API_KEY in .env.local or environment.
 
 Exit codes:
-    0 — preflight passed (audio bytes received)
-    1 — preflight failed (API error, no audio, or wrong config)
+    0 - preflight passed (audio bytes received)
+    1 - preflight failed (API error, no audio, or wrong config)
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def check_env() -> bool:
     required = ["RIME_API_KEY"]
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
-        print(f"❌ Missing environment variables: {', '.join(missing)}")
+        print(f"[ERROR] Missing environment variables: {', '.join(missing)}")
         print("   Copy .env.example to .env.local and fill in values.")
         return False
     return True
@@ -43,19 +43,21 @@ def check_env() -> bool:
 def preflight_rime_http() -> bool:
     """Call Rime HTTP API directly to validate model/voice/language."""
     import urllib.request
+    import urllib.error
     import json
 
     api_key = os.environ["RIME_API_KEY"]
-    url = "https://api.rime.ai/v1/speech"
+    url = "https://users.rime.ai/v1/rime-tts"
 
-    payload = json.dumps({
-        "text": "Hello, this is EchoCoach. Pronunciation coaching starts now.",
-        "speaker": "celeste",
-        "modelId": "coda",
-        "lang": "en",
-        "audioFormat": "mp3",
-        "samplingRate": 16000,
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "text": "Hello, this is EchoCoach. Pronunciation coaching starts now.",
+            "speaker": "celeste",
+            "modelId": "coda",
+            "lang": "en",
+            "samplingRate": 24000,
+        }
+    ).encode("utf-8")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -65,7 +67,7 @@ def preflight_rime_http() -> bool:
 
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
 
-    print("🔍 Testing Rime API…")
+    print("[CHECK] Testing Rime API...")
     print(f"   Model:    coda")
     print(f"   Voice:    celeste")
     print(f"   Language: en")
@@ -81,14 +83,18 @@ def preflight_rime_http() -> bool:
             latency_ms = (t1 - t0) * 1000
 
             if len(audio_bytes) < 100:
-                print(f"❌ Received only {len(audio_bytes)} bytes — likely an error response.")
+                print(
+                    f"[ERROR] Received only {len(audio_bytes)} bytes - likely an error response."
+                )
                 print(f"   Body: {audio_bytes[:200]}")
                 return False
 
-            print(f"✅ Rime preflight PASSED")
+            print(f"[OK] Rime preflight PASSED")
             print(f"   Audio bytes received: {len(audio_bytes):,}")
             print(f"   Round-trip latency:   {latency_ms:.0f}ms")
-            print(f"   Content-Type:         {resp.headers.get('Content-Type', 'unknown')}")
+            print(
+                f"   Content-Type:         {resp.headers.get('Content-Type', 'unknown')}"
+            )
 
             # Save the preflight audio as a fixture
             fixtures_dir = os.path.join(os.path.dirname(__file__), "..", "fixtures")
@@ -103,33 +109,34 @@ def preflight_rime_http() -> bool:
     except urllib.error.HTTPError as e:
         t1 = time.perf_counter()
         body = e.read().decode("utf-8", errors="replace")
-        print(f"❌ Rime API returned HTTP {e.code}")
+        print(f"[ERROR] Rime API returned HTTP {e.code}")
         print(f"   Body: {body[:500]}")
         print(f"   Latency: {(t1 - t0) * 1000:.0f}ms")
         return False
 
     except Exception as e:
-        print(f"❌ Rime preflight failed with exception: {e}")
+        print(f"[ERROR] Rime preflight failed with exception: {e}")
         return False
 
 
 def preflight_speed_alpha() -> bool:
-    """Test speed_alpha > 1.0 for slowed coaching delivery."""
+    """Test timeScaleFactor > 1.0 for slowed coaching delivery."""
     import urllib.request
     import json
 
     api_key = os.environ["RIME_API_KEY"]
-    url = "https://api.rime.ai/v1/speech"
+    url = "https://users.rime.ai/v1/rime-tts"
 
-    payload = json.dumps({
-        "text": "Pronunciation.",
-        "speaker": "celeste",
-        "modelId": "coda",
-        "lang": "en",
-        "audioFormat": "mp3",
-        "samplingRate": 16000,
-        "speedAlpha": 1.5,  # slowed down for word-by-word coaching
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "text": "Pronunciation.",
+            "speaker": "celeste",
+            "modelId": "coda",
+            "lang": "en",
+            "samplingRate": 24000,
+            "timeScaleFactor": 1.5,
+        }
+    ).encode("utf-8")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -140,13 +147,13 @@ def preflight_speed_alpha() -> bool:
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
 
     print()
-    print("🔍 Testing Rime speed_alpha=1.5 (slowed coaching)…")
+    print("[CHECK] Testing Rime timeScaleFactor=1.5 (slowed coaching)...")
     t0 = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             audio_bytes = resp.read()
             t1 = time.perf_counter()
-            print(f"✅ speed_alpha test PASSED")
+            print(f"[OK] timeScaleFactor test PASSED")
             print(f"   Audio bytes: {len(audio_bytes):,}")
             print(f"   Latency:     {(t1 - t0) * 1000:.0f}ms")
 
@@ -158,13 +165,13 @@ def preflight_speed_alpha() -> bool:
             return True
 
     except Exception as e:
-        print(f"❌ speed_alpha test failed: {e}")
+        print(f"[ERROR] timeScaleFactor test failed: {e}")
         return False
 
 
 def main() -> int:
     print("=" * 60)
-    print("  EchoCoach — Rime Preflight Check")
+    print("  EchoCoach - Rime Preflight Check")
     print("=" * 60)
     print()
 
@@ -177,9 +184,9 @@ def main() -> int:
 
     print()
     if ok:
-        print("🎉 All Rime preflight checks passed. Ready for Phase 1.")
+        print("[DONE] All Rime preflight checks passed. Ready for Phase 1.")
     else:
-        print("💥 Rime preflight FAILED. Fix before writing any feature code.")
+        print("[FAIL] Rime preflight FAILED. Fix before writing any feature code.")
 
     return 0 if ok else 1
 

@@ -81,21 +81,25 @@ python scripts/rime_preflight.py
 This script validates:
 - Rime API key is set and works
 - Model `coda` + voice `celeste` returns audio
-- `speed_alpha=1.5` returns audio (slowed delivery)
+- `timeScaleFactor=1.5` returns audio (slowed delivery)
 - Saves fixture audio files to `fixtures/`
+
+Last run: 2026-09-06, both checks PASSED via `https://users.rime.ai/v1/rime-tts`.
 
 ---
 
 ## Results
 
-> **TODO:** Fill in measured values after Phase 4–6.
+> Preflight measured on 2026-09-06. Core claim metrics need Phase 4-6.
 
 | Metric | Target | Measured (uncached) | Measured (cached) |
 |--------|--------|--------------------|--------------------|
+| Preflight normal clip latency | — | 2866ms, 84960 bytes, audio/mpeg | — |
+| Preflight slowed clip latency | — | 1432ms, 35520 bytes, audio/mpeg | — |
 | Detection→correction latency | ≤ 1s | — | — |
 | Pronunciation flag accuracy | ≥ 8/10 | — | — |
 | Interruption stop time | ≤ 300ms | — | — |
-| Slow-mode intelligibility | Natural (human check) | — | — |
+| Slow-mode intelligibility | Natural (human check) | Pass on preflight clip (human check pending) | — |
 
 ---
 

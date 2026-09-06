@@ -29,8 +29,15 @@ cp .env.example .env.local
 ```bash
 cd agent
 python -m venv .venv
-.venv/Scripts/activate     # Windows
-# source .venv/bin/activate  # macOS/Linux
+```
+
+Activate the venv every time before running the agent:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+```bash
 pip install -e ".[dev]"
 ```
 
@@ -51,8 +58,11 @@ This validates your Rime API key, model, voice, and speed control work.
 
 ### 5. Start the Agent
 
+Keep this terminal running. Open a new terminal for the web client.
+
 ```bash
 cd agent
+.\.venv\Scripts\Activate.ps1
 python -m echocoach.main dev
 ```
 

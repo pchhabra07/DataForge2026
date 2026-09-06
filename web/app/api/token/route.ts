@@ -8,7 +8,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { AccessToken } from "livekit-server-sdk";
+import { AccessToken, AgentDispatchClient } from "livekit-server-sdk";
 
 export async function GET(req: NextRequest) {
   const room = req.nextUrl.searchParams.get("room") || "echocoach-dev";
@@ -43,6 +43,18 @@ export async function GET(req: NextRequest) {
   });
 
   const jwt = await token.toJwt();
+
+  try {
+    const httpHost = livekitUrl.replace(/^wss:/, "https:");
+    const dispatchClient = new AgentDispatchClient(
+      httpHost,
+      apiKey,
+      apiSecret
+    );
+    await dispatchClient.createDispatch(room, "echocoach");
+  } catch (e) {
+    console.warn("Agent dispatch failed, agent may not join:", e);
+  }
 
   return NextResponse.json({
     token: jwt,

@@ -10,6 +10,7 @@ Phase 1 goal: prove end-to-end audio path — click → Rime voice plays in brow
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 from dotenv import load_dotenv
@@ -17,7 +18,7 @@ from livekit import agents
 from livekit.agents import Agent, AgentServer, AgentSession, RoomInputOptions
 from livekit.plugins import deepgram, rime, silero
 
-load_dotenv(".env.local")
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env.local"))
 
 logger = logging.getLogger("echocoach")
 logger.setLevel(logging.INFO)
@@ -78,7 +79,7 @@ async def echocoach_session(ctx: agents.JobContext):
             model=RIME_MODEL,
             speaker=RIME_VOICE,
             speed_alpha=1.0,
-            use_websocket=True,       # lower latency + word-level timestamps
+            use_websocket=True,  # lower latency + word-level timestamps
         ),
         # --- STT: Deepgram (verbatim, word timestamps) — wired for Phase 2 ---
         stt=deepgram.STT(
@@ -102,13 +103,9 @@ async def echocoach_session(ctx: agents.JobContext):
     # Speak the coaching greeting via Rime
     # This is the Phase 1 acceptance test: user must hear this in the browser.
     t_speak = time.perf_counter()
-    await session.generate_reply(
-        instructions=f"Say exactly this: {COACHING_GREETING}"
-    )
+    await session.say(COACHING_GREETING)
     t_done = time.perf_counter()
-    logger.info(
-        f"Rime greeting first-byte latency: {(t_done - t_speak) * 1000:.0f}ms (approx)"
-    )
+    logger.info(f"Rime greeting first-byte latency: {(t_done - t_speak) * 1000:.0f}ms (approx)")
 
 
 if __name__ == "__main__":
