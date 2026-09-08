@@ -12,8 +12,11 @@
 
 - Python ≥ 3.10
 - Node.js ≥ 20
+- ffmpeg installed and on PATH (audio decode for scoring)
 - A [LiveKit Cloud](https://cloud.livekit.io) account (free tier)
-- API keys: Rime, Deepgram, Azure Speech, OpenAI (see `.env.example`)
+- API keys: Rime, Deepgram, OpenAI (see `.env.example`)
+- Pronunciation scoring is free and on-device, no key needed.
+  First run downloads a ~1.2GB model to the HuggingFace cache.
 
 ### 1. Clone & Configure
 
@@ -83,10 +86,10 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 User speaks → Browser (mic, UI, audio playback)
                     ↓ WebRTC via LiveKit
               LiveKit Agent (Python)
-              ├── STT: Deepgram (words + timestamps)
-              ├── Pronunciation: Azure Speech Assessment
-              ├── Coaching Logic: LLM (error selection)
-              └── TTS: Rime (primary spoken output)
+               ├── STT: Deepgram (words + timestamps)
+               ├── Pronunciation: free on-device engine (wav2vec2 phonemes)
+               ├── Coaching Logic: LLM (error selection, rules fallback)
+               └── TTS: Rime (primary spoken output)
                     ↓ streamed audio
               Back to browser → user hears correction
 ```
@@ -131,15 +134,16 @@ DataForge2026/
 | [Rime](https://rime.ai) | TTS — primary spoken output | ✅ |
 | [LiveKit](https://livekit.io) | WebRTC transport & orchestration | ✅ |
 | [Deepgram](https://deepgram.com) | Speech-to-text (word timestamps) | ✅ |
-| [Azure Speech](https://azure.microsoft.com/en-us/products/ai-services/speech-service) | Pronunciation assessment | ✅ |
-| [OpenAI](https://openai.com) | LLM coaching logic | ✅ |
+| pronounce-assess (MIT) | On-device pronunciation scoring, no key | ✅ |
+| [OpenAI](https://openai.com) | LLM coaching logic (rules fallback) | Optional |
 
 ## Known Limitations
 
 - English only (`en-US`).
 - Reading mode only (scripted target sentences).
-- Requires stable internet for all API calls.
-- First Rime call may have higher latency (cold start).
+- Requires stable internet for LiveKit, Rime, Deepgram calls. Scoring itself is offline.
+- First scoring attempt loads the model (about 15s once per session, warmed up at start).
+- Words missing from the phoneme dictionary get the sentence average, never flagged.
 
 ## License
 

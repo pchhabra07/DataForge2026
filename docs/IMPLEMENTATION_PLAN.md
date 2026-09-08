@@ -6,7 +6,7 @@ Detect mispronunciation/filler while the user speaks, then within ~1s speak back
 ## Stack (locked from PRD)
 - **Transport / orchestration:** LiveKit Agents (Python agent server + browser client)
 - **STT:** Deepgram (word timestamps, verbatim/fillers)
-- **Pronunciation "how":** Azure Speech Pronunciation Assessment (per-word/phoneme accuracy, fluency, prosody)
+- **Pronunciation "how":** Free on-device engine (pronounce-assess, wav2vec2 phonemes) — per-word accuracy, completeness, rhythm-based fluency, no key, no cost
 - **Coaching brain:** LLM (pick errors, phrase feedback)
 - **TTS:** Rime `coda` primary, `mistv3` low-latency fallback; `speed_alpha` for slow mode
 - **Client:** Web (React/Next), WebRTC via LiveKit
@@ -17,7 +17,7 @@ Detect mispronunciation/filler while the user speaks, then within ~1s speak back
 ## Phase 0 — Foundation & Preflight (Day 1, first half)
 Goal: skeleton + credentials proven before any feature code.
 - Repo scaffold: `/agent` (Python LiveKit agent), `/web` (client), `/docs`, `/fixtures`, `/scripts`
-- `.env.example` with placeholders only (Rime, Deepgram, Azure, LiveKit, LLM keys) — no secrets committed ever
+- `.env.example` with placeholders only (Rime, Deepgram, LiveKit, LLM keys) — no secrets committed ever. Pronunciation scoring needs no key.
 - LiveKit project + local dev token flow
 - **Rime preflight:** confirm exact model ID / voice / language / endpoint / audio format work against the live catalog. This is a submission gate — do it first.
 - CI-lite: lint + typecheck both packages
@@ -46,7 +46,7 @@ Exit: speak → see transcript, WPM, filler count update live.
 
 ## Phase 3 — Pronunciation: How It Was Said (Day 3)
 Goal: the "how" signal — the product's real differentiator.
-- Integrate Azure Pronunciation Assessment (streaming mode)
+- Integrate free on-device pronunciation scoring (turn-based, model preloaded at session start)
 - Reading mode: fixed target sentence as reference text
 - Per-word accuracy + phoneme scores flowing to agent
 - Client: per-word score display beside transcript ("truth beside estimate")

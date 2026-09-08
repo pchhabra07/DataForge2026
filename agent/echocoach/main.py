@@ -2,8 +2,8 @@
 EchoCoach — LiveKit Agent Entry Point (Phase 3+4)
 
 This agent joins a LiveKit room, presents target sentences for reading practice,
-captures user audio, runs Azure Pronunciation Assessment, generates coaching
-feedback via LLM, and speaks corrections using Rime TTS (normal + slow speed).
+captures user audio, runs free on-device pronunciation assessment, generates
+coaching feedback via LLM, and speaks corrections using Rime TTS (normal + slow speed).
 
 Phase 3: pronunciation assessment with per-word scoring
 Phase 4: coaching logic + corrective Rime at normal/slow speed
@@ -24,7 +24,7 @@ from livekit.agents import Agent, AgentServer, AgentSession, RoomInputOptions
 from livekit.plugins import deepgram, rime, silero
 
 from echocoach.coaching import generate_correction
-from echocoach.pronunciation import assess_pronunciation
+from echocoach.pronunciation import assess_pronunciation, warmup_free_assessor
 from echocoach.sentences import get_first_sentence, get_next_sentence
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env.local"))
@@ -136,6 +136,8 @@ async def echocoach_session(ctx: agents.JobContext):
     t1 = time.perf_counter()
     logger.info(f"Session started in {(t1 - t0) * 1000:.0f}ms")
 
+    asyncio.create_task(warmup_free_assessor())
+
     # --- Helper: send JSON data to client ---
     async def send_to_client(topic: str, data: dict):
         """Send structured data to the client via LiveKit data channel."""
@@ -223,6 +225,13 @@ async def echocoach_session(ctx: agents.JobContext):
     @_serialize_utterances
     async def process_utterance(audio_data: bytes):
         """Run pronunciation assessment + coaching on captured audio."""
+        try:
+            await _process_utterance_inner(audio_data)
+        except Exception:
+            logger.exception("Utterance processing failed, returning to listening")
+            await send_to_client("state", {"state": "listening"})
+
+    async def _process_utterance_inner(audio_data: bytes):
         nonlocal current_sentence
 
         if len(audio_data) < 4800:  # Too short
@@ -234,9 +243,7 @@ async def echocoach_session(ctx: agents.JobContext):
         # Send "assessing" state to client
         await send_to_client("state", {"state": "assessing"})
 
-        # Run pronunciation assessment
-        # Note: Azure SDK internally uses synchronous blocking calls
-        # but our assess_pronunciation wraps them properly
+        # Run pronunciation assessment in a worker thread
         result = await assess_pronunciation(
             audio_bytes=bytes(audio_data),
             reference_text=current_sentence.text,

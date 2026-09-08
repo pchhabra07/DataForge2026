@@ -92,8 +92,8 @@ EchoCoach targets **two** of the hackathon's difficult voice problems, with one 
             ┌───────────▼──┐   ┌────────▼────────┐   ┌──▼───────────────┐
             │  ASR (STT)   │   │ Pronunciation    │   │ Coaching Logic   │
             │  Deepgram/   │   │ Assessment       │   │ (LLM + rules):   │
-            │  OpenAI/     │   │ Azure Speech     │   │ decide what to   │
-            │  Whisper     │   │ (accuracy,       │   │ correct & how    │
+            │  OpenAI/     │   │ Free engine      │   │ decide what to   │
+            │  Whisper     │   │ (wav2vec2       │   │ correct & how    │
             │  → words +   │   │ fluency, prosody,│   │                  │
             │  timestamps  │   │ phoneme scores)  │   │                  │
             └──────┬───────┘   └────────┬─────────┘   └──────┬───────────┘
@@ -125,7 +125,7 @@ EchoCoach targets **two** of the hackathon's difficult voice problems, with one 
 |-------|--------|-----|
 | Transport / orchestration | **LiveKit Agents** | Official Rime integration; handles turn-taking, streaming, interruption. Recommended by the PS. |
 | Speech-to-text | **Deepgram** or **OpenAI** (verbatim mode) | Word-level timestamps needed for pace + filler timing. |
-| Pronunciation "how" signal | **Azure Speech Pronunciation Assessment** | Returns per-word + per-phoneme accuracy, fluency, completeness, and prosody scores. Supports streaming mode. Fits the "how you spoke" requirement directly. |
+| Pronunciation "how" signal | **Free on-device engine (pronounce-assess, wav2vec2 phonemes)** | Returns per-word accuracy plus completeness plus rhythm-based fluency. Zero API cost, no key, runs turn-based after each attempt. Fits the "how you spoke" requirement directly. |
 | Filler detection | ASR verbatim transcript + timestamp gaps (optional: CrisperWhisper for verbatim `[um]`/`[uh]`) | Localizes and classifies fillers reliably. |
 | Coaching logic | **LLM** (any) | Decides which errors to correct and phrases the spoken feedback. |
 | **Spoken output** | **Rime — Coda** (quality) with **Mist v3** fallback (lowest latency) | Rime is the judged primary voice. Coda for natural coaching; Mist v3 when speed is critical. |
@@ -200,7 +200,7 @@ All numbers must be measured, not claimed. Cached vs uncached runs labeled separ
 |-----|------|
 | **1** | Repo + LiveKit + Rime "hello world" voice loop working. Lock acceptance test. |
 | **2** | Wire ASR (words + timestamps). Basic transcript display. |
-| **3** | Integrate Azure Pronunciation Assessment. Get per-word scores flowing. |
+| **3** | Integrate free on-device pronunciation scoring. Get per-word scores flowing. |
 | **4** | Coaching logic: pick errors → generate Rime correction (normal + slow speed). |
 | **5** | Interruption/barge-in handling. Filler + pace readout. |
 | **6** | Polish UI (preset running, truth-beside-estimate). Record fixtures, measure latency. |
@@ -212,7 +212,7 @@ All numbers must be measured, not claimed. Cached vs uncached runs labeled separ
 
 | Risk | Mitigation |
 |------|-----------|
-| Real-time pronunciation scoring adds latency | Use Azure streaming mode; run scoring async; keep Rime correction on the critical path short. |
+| Real-time pronunciation scoring adds latency | Score turn-based in a worker thread with model preloaded at session start; keep Rime correction on the critical path short. |
 | Rime is only used incidentally (disqualifier) | Every correction is spoken by Rime; it is the primary output, never a welcome message. |
 | Interruption logic is hard | Lean on LiveKit's built-in turn detection + speech-handle interruption; fence stale results. |
 | Overclaiming numbers | Measure everything; label cached vs uncached; disclose limits in RIME_EVIDENCE.md. |

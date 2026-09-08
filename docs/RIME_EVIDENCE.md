@@ -107,7 +107,7 @@ Last run: 2026-09-06, both checks PASSED via `https://users.rime.ai/v1/rime-tts`
 
 - English only (`en-US`).
 - Reading mode only (scripted target sentence).
-- Pronunciation scoring depends on Azure Speech Assessment accuracy.
+- Pronunciation scoring is on-device GOP estimates, not human grades. Words missing from the phoneme dictionary get the sentence average and are never flagged.
 - Rime latency varies by region and load; uncached first call may exceed target.
 
 ---

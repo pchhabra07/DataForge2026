@@ -10,7 +10,7 @@ dependencies = [
     "livekit-plugins-silero>=0.7",
     "livekit-plugins-openai>=0.10",
     "python-dotenv>=1.0",
-    "azure-cognitiveservices-speech>=1.40",
+    "pronounce-assess>=0.1",
     "openai>=1.30",
 ]
 

@@ -1,26 +1,36 @@
 """
-EchoCoach — Azure Pronunciation Assessment
+EchoCoach — Free On-Device Pronunciation Assessment
 
-Integrates with Azure Speech SDK to evaluate pronunciation quality.
+Uses the open-source pronounce-assess engine (wav2vec2 phoneme model, MIT)
+to evaluate pronunciation quality with zero API cost and no key.
 Takes raw PCM audio + reference text, returns per-word accuracy scores.
 
-Audio requirements: 16kHz, 16-bit, mono PCM (standard for Azure Speech).
+Audio requirements: 16kHz mono float32 for the engine (resampled in-house).
 LiveKit typically delivers 48kHz — we resample before sending.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
+import re
 import struct
+import threading
 from dataclasses import dataclass, field
+
+import numpy as np
 
 logger = logging.getLogger("echocoach.pronunciation")
 
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
 # Flag threshold: words below this score get flagged for correction
 DEFAULT_FLAG_THRESHOLD = 60
+
+_MODEL_LOCK = threading.RLock()
+_SCORER = None
 
 
 @dataclass
@@ -33,10 +43,7 @@ class WordScore:
 
     @property
     def is_flagged(self) -> bool:
-        return (
-            self.accuracy_score < DEFAULT_FLAG_THRESHOLD
-            or self.error_type == "Mispronunciation"
-        )
+        return self.accuracy_score < DEFAULT_FLAG_THRESHOLD or self.error_type == "Mispronunciation"
 
     def to_dict(self) -> dict:
         return {
@@ -107,7 +114,7 @@ def resample_pcm(
     if num_samples == 0:
         return b""
 
-    samples = struct.unpack(f"<{num_samples}h", audio_bytes[:num_samples * sample_width])
+    samples = struct.unpack(f"<{num_samples}h", audio_bytes[: num_samples * sample_width])
 
     # Calculate output size
     ratio = target_rate / source_rate
@@ -135,7 +142,7 @@ async def assess_pronunciation(
     reference_text: str,
     sample_rate: int = 48000,
 ) -> PronunciationResult | None:
-    """Run Azure Pronunciation Assessment on raw PCM audio.
+    """Run on-device pronunciation assessment on raw PCM audio.
 
     Args:
         audio_bytes: Raw PCM audio (16-bit signed LE, mono).
@@ -145,8 +152,7 @@ async def assess_pronunciation(
     Returns:
         PronunciationResult with per-word scores, or None on failure.
     """
-    # Run the blocking Azure SDK call in a thread to avoid blocking the event loop
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
         _assess_pronunciation_sync,
@@ -156,10 +162,37 @@ async def assess_pronunciation(
     )
 
 
-def _mock_pronunciation_assessment(reference_text: str) -> PronunciationResult:
-    """Generate a realistic simulated pronunciation assessment when Azure Speech is not set.
+async def warmup_free_assessor() -> None:
+    """Preload the scoring model in the background so the first attempt is fast."""
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.run_in_executor(None, _get_scorer)
+    except Exception:
+        logger.exception("Pronunciation model warmup failed, first attempt will load it")
 
-    Allows running and testing the complete UI and coaching loop without an Azure API key.
+
+def _get_scorer():
+    """Load the phoneme scoring model once and reuse it for every attempt."""
+    global _SCORER
+    if _SCORER is not None:
+        return _SCORER
+    with _MODEL_LOCK:
+        if _SCORER is not None:
+            return _SCORER
+        import time
+
+        from pronounce_assess.models import PronounceAssessModel
+
+        t0 = time.perf_counter()
+        _SCORER = PronounceAssessModel(device="cpu")
+        logger.info("Pronunciation model loaded in %.1fs", time.perf_counter() - t0)
+        return _SCORER
+
+
+def _mock_pronunciation_assessment(reference_text: str) -> PronunciationResult:
+    """Generate a realistic simulated pronunciation assessment for UI tests.
+
+    Allows running and testing the complete UI and coaching loop without audio.
     """
     import re
 
@@ -222,145 +255,129 @@ def _assess_pronunciation_sync(
     sample_rate: int = 48000,
 ) -> PronunciationResult | None:
     """Synchronous pronunciation assessment — runs in executor thread."""
-    speech_key = (os.environ.get("AZURE_SPEECH_KEY") or "").strip()
-    speech_region = (os.environ.get("AZURE_SPEECH_REGION") or "eastus").strip()
+    import time
 
-    # If Azure Speech is not configured, provide simulated assessment for testing
-    if not speech_key or speech_key.startswith("your_"):
-        logger.info(
-            "AZURE_SPEECH_KEY not configured — using simulated pronunciation assessment (demo mode)"
-        )
-        return _mock_pronunciation_assessment(reference_text)
+    from pronounce_assess import phonemes
 
-    try:
-        import azure.cognitiveservices.speech as speechsdk
-    except ImportError:
-        logger.error(
-            "azure-cognitiveservices-speech not installed. "
-            "Run: pip install azure-cognitiveservices-speech"
-        )
-        return None
-
-    if len(audio_bytes) < 3200:  # less than ~100ms at 16kHz
+    if len(audio_bytes) < 3200:
         logger.warning("Audio too short for pronunciation assessment (%d bytes)", len(audio_bytes))
         return None
 
-    # Resample to 16kHz for Azure
+    words_raw = re.findall(r"[A-Za-z']+", reference_text)
+    if not words_raw:
+        words_raw = reference_text.split()
+    if not words_raw:
+        return None
+
     pcm_16k = resample_pcm(audio_bytes, source_rate=sample_rate, target_rate=16000)
-    if len(pcm_16k) == 0:
+    if len(pcm_16k) < 3200:
         logger.warning("Resampled audio is empty")
         return None
 
+    samples = np.frombuffer(pcm_16k, dtype=np.int16).astype(np.float32) / 32768.0
+
     logger.info(
-        "Running pronunciation assessment: %d bytes PCM → %d bytes @16kHz, ref=%r",
+        "Running free pronunciation assessment: %d bytes PCM, ref=%r",
         len(audio_bytes),
-        len(pcm_16k),
         reference_text[:60],
     )
-
+    t0 = time.perf_counter()
     try:
-        # Set up Azure Speech config
-        speech_config = speechsdk.SpeechConfig(
-            subscription=speech_key,
-            region=speech_region,
-        )
-        speech_config.speech_recognition_language = "en-US"
-
-        # Create push audio stream (16kHz, 16-bit, mono)
-        stream_format = speechsdk.audio.AudioStreamFormat.get_wave_format_pcm(
-            samples_per_second=16000,
-            bits_per_sample=16,
-            channels=1,
-        )
-        push_stream = speechsdk.audio.PushAudioInputStream(stream_format=stream_format)
-        audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
-
-        # Create recognizer
-        recognizer = speechsdk.SpeechRecognizer(
-            speech_config=speech_config,
-            audio_config=audio_config,
-        )
-
-        # Configure pronunciation assessment
-        pron_config = speechsdk.PronunciationAssessmentConfig(
-            reference_text=reference_text,
-            grading_system=speechsdk.PronunciationAssessmentGradingSystem.HundredMark,
-            granularity=speechsdk.PronunciationAssessmentGranularity.Phoneme,
-            enable_miscue=True,
-        )
-        pron_config.enable_prosody_assessment()
-        pron_config.apply_to(recognizer)
-
-        # Start recognition and push data
-        result_future = recognizer.recognize_once_async()
-
-        # Push audio in chunks to avoid blocking
-        chunk_size = 32000  # ~1 second at 16kHz/16-bit
-        for offset in range(0, len(pcm_16k), chunk_size):
-            push_stream.write(pcm_16k[offset : offset + chunk_size])
-        push_stream.close()
-
-        # Get result (blocking)
-        result = result_future.get()
-
-        if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-            return _parse_result(result, reference_text)
-        elif result.reason == speechsdk.ResultReason.NoMatch:
-            logger.warning("Azure Speech: no match — audio may not contain clear speech")
-            return None
-        else:
-            cancellation = result.cancellation_details
-            logger.error(
-                "Azure Speech assessment failed: reason=%s, error=%s",
-                cancellation.reason if cancellation else "unknown",
-                cancellation.error_details if cancellation else "unknown",
-            )
-            return None
-
+        with _MODEL_LOCK:
+            scorer = _get_scorer()
+            scorer.set_sentence(reference_text)
+            raw_events = list(scorer.stream_decode(iter([samples])))
     except Exception:
-        logger.exception("Pronunciation assessment error")
+        logger.exception("Free pronunciation assessment failed")
         return None
+    score_ms = (time.perf_counter() - t0) * 1000
 
+    prosody = next((e for e in raw_events if e.label == "prosody"), None)
+    events = [e for e in raw_events if e.label != "prosody"]
 
-def _parse_result(result, reference_text: str) -> PronunciationResult:
-    """Parse Azure Speech SDK result into our PronunciationResult structure."""
-    import azure.cognitiveservices.speech as speechsdk
+    processor = scorer.processor
+    sentence_phns = list(scorer.reference_phonemes or [])
+    word_phns = [phonemes.sentence_to_phonemes(w, processor) for w in words_raw]
+    flat_concat = [p for wps in word_phns for p in wps]
+    if flat_concat != sentence_phns:
+        logger.warning(
+            "Per-word phonemes diverge from sentence reference (%d vs %d), scores approximate",
+            len(flat_concat),
+            len(sentence_phns),
+        )
+    starts: list[int] = []
+    acc = 0
+    for wps in word_phns:
+        starts.append(acc)
+        acc += len(wps)
 
-    pron_result = speechsdk.PronunciationAssessmentResult(result)
+    scored_rows: list[tuple[str, float, str] | None] = []
+    aligned_words = 0
+    for w, wps, s in zip(words_raw, word_phns, starts):
+        n = len(wps)
+        if n == 0:
+            scored_rows.append(None)
+            continue
+        by_pos = {}
+        for e in events:
+            if e.position is not None and s <= e.position < s + n:
+                by_pos.setdefault(e.position, e)
+        gops: list[float] = []
+        labels: list[str] = []
+        for k in range(n):
+            e = by_pos.get(s + k)
+            if e is None:
+                gops.append(0.0)
+                labels.append("omitted")
+            else:
+                labels.append(e.label)
+                gops.append(float(e.gop) if e.gop is not None else float("nan"))
+        valid = [g for g in gops if g == g]
+        word_acc = round(100.0 * float(np.mean(valid)), 1) if valid else 0.0
+        if any(label == "omitted" for label in labels):
+            err: str = "Omission"
+        elif any(label == "mispronounced" for label in labels):
+            err = "Mispronunciation"
+        else:
+            err = "None"
+        heard = sum(1 for label, g in zip(labels, gops) if label != "omitted" or g > 0)
+        if heard * 2 >= n:
+            aligned_words += 1
+        scored_rows.append((w, word_acc, err))
 
-    # Extract per-word scores from the JSON response
-    words: list[WordScore] = []
-    json_str = result.properties.get(
-        speechsdk.PropertyId.SpeechServiceResponse_JsonResult
+    present = [r[1] for r in scored_rows if r is not None]
+    sent_mean = round(float(np.mean(present)), 1) if present else 0.0
+    word_scores = [
+        WordScore(
+            word=w,
+            accuracy_score=(r[1] if r is not None else sent_mean),
+            error_type=(r[2] if r is not None else "None"),
+        )
+        for w, r in zip(words_raw, scored_rows)
+    ]
+
+    phoneme_words = [w for w, wps in zip(words_raw, word_phns) if len(wps) > 0]
+    completeness = (
+        round(100.0 * aligned_words / max(len(phoneme_words), 1), 1) if phoneme_words else 0.0
+    )
+    rhythm = prosody.rhythm_score if prosody is not None else None
+    boundary = prosody.boundary_score if prosody is not None else None
+    fluency = round(100.0 * float(rhythm), 1) if rhythm is not None else sent_mean
+    prosody_score = (
+        round(100.0 * float(boundary), 1) if boundary is not None and float(boundary) > 0 else 0.0
     )
 
-    if json_str:
-        try:
-            json_data = json.loads(json_str)
-            nbest = json_data.get("NBest", [])
-            if nbest:
-                best = nbest[0]
-                pa_words = best.get("PronunciationAssessment", {}).get("Words", [])
-                # If Words not at that path, try the Words key directly
-                if not pa_words:
-                    pa_words = best.get("Words", [])
-                for w in pa_words:
-                    pa = w.get("PronunciationAssessment", {})
-                    words.append(
-                        WordScore(
-                            word=w.get("Word", ""),
-                            accuracy_score=pa.get("AccuracyScore", 0),
-                            error_type=pa.get("ErrorType", "None"),
-                        )
-                    )
-        except (json.JSONDecodeError, KeyError, IndexError):
-            logger.warning("Failed to parse per-word scores from JSON response")
-
+    logger.info(
+        "Free assessment in %.0fms: accuracy=%.1f, flagged=%d words",
+        score_ms,
+        sent_mean,
+        sum(1 for ws in word_scores if ws.is_flagged),
+    )
     return PronunciationResult(
-        recognized_text=result.text or "",
-        accuracy_score=pron_result.accuracy_score or 0,
-        fluency_score=pron_result.fluency_score or 0,
-        completeness_score=pron_result.completeness_score or 0,
-        prosody_score=getattr(pron_result, "prosody_score", 0) or 0,
-        words=words,
+        recognized_text=reference_text,
+        accuracy_score=sent_mean,
+        fluency_score=fluency,
+        completeness_score=completeness,
+        prosody_score=prosody_score,
+        words=word_scores,
     )
