@@ -5,6 +5,7 @@ import {
   LiveKitRoom,
   RoomAudioRenderer,
   useConnectionState,
+  useLocalParticipant,
   useRoomContext,
   useTranscriptions,
   useVoiceAssistant,
@@ -316,6 +317,9 @@ function SessionView({
   // --- Phase 6: Slow-mode toggle ---
   const [slowMode, setSlowMode] = useState(false);
 
+  const [modelStatus, setModelStatus] = useState<string | null>(null);
+  const [micMuted, setMicMuted] = useState(false);
+
   const [sessionStart, setSessionStart] = useState<number | null>(() => null);
   const [sessionElapsed, setSessionElapsed] = useState(0);
   const [nextBusy, setNextBusy] = useState(false);
@@ -461,6 +465,14 @@ function SessionView({
           setPipelineMetrics(toPipelineSnapshot(raw));
           break;
         }
+        case "model_status": {
+          if (participant && !isAgentParticipant(participant)) return;
+          const s = toStringValue(raw.status, "");
+          if (s === "loading" || s === "ready" || s === "error") {
+            setModelStatus(s);
+          }
+          break;
+        }
         case "interruption": {
           if (participant && !isAgentParticipant(participant)) return;
           setShowSkippedToast(true);
@@ -547,6 +559,17 @@ function SessionView({
     setSessionState("listening");
   }, []);
 
+  const { localParticipant } = useLocalParticipant();
+
+  const handleToggleMute = useCallback(async () => {
+    try {
+      const next = !micMuted;
+      await localParticipant.setMicrophoneEnabled(!next);
+      setMicMuted(next);
+    } catch (e) {
+      console.error("Mic toggle failed:", e);
+    }
+  }, [localParticipant, micMuted]);
   // --- RPC: Hear a word ---
   const handleHearWord = useCallback(
     async (word: string, speed: "normal" | "slow") => {
@@ -592,9 +615,11 @@ function SessionView({
   const isSpeaking = agentState === "speaking";
   const stateInfo = STATE_LABELS[sessionState] || STATE_LABELS.idle;
   const deckStatus =
-    connectionState !== ConnectionState.Connected
-      ? "Connecting microphone…"
-      : sessionState === "listening"
+    micMuted
+      ? "Mic muted — unmute to speak"
+      : connectionState !== ConnectionState.Connected
+        ? "Connecting microphone…"
+        : sessionState === "listening"
         ? "Mic live — read the sentence aloud"
         : sessionState === "listening_active"
           ? "Mic live — hearing you…"
@@ -621,6 +646,16 @@ function SessionView({
           />
         )}
       </div>
+      {modelStatus === "loading" && (
+        <div className="agent-line">
+          Preparing scoring model — first attempt takes a moment…
+        </div>
+      )}
+      {modelStatus === "error" && (
+        <div className="agent-line">
+          Scoring model failed to load — check agent logs
+        </div>
+      )}
 
       {agentMissing && (
         <div className="agent-line">
@@ -877,6 +912,13 @@ function SessionView({
           </div>
           <div className="deck-status">{deckStatus}</div>
           <div className="deck-actions">
+            <button
+              className="deck-btn"
+              onClick={handleToggleMute}
+              title={micMuted ? "Unmute microphone" : "Mute microphone"}
+            >
+              {micMuted ? "Unmute" : "Mute"}
+            </button>
             {/* Phase 6: Slow-mode toggle */}
             <button
               className={`deck-btn toggle-btn ${slowMode ? "active" : ""}`}

@@ -50,33 +50,33 @@ Open **http://localhost:3000**, click "Start Coaching Session", and speak!
 
 ```
                     ┌──────────────────────────────────────────┐
-   User speaks →    │  Browser client (mic capture, UI, audio)  │
+   User speaks →    │  Browser client (mic capture, UI, audio) │
                     └───────────────┬──────────────────────────┘
                                     │  audio (WebRTC / LiveKit)
                                     ▼
                     ┌──────────────────────────────────────────┐
-                    │       LiveKit Agent (Python server)       │
-                    │  - VAD + turn detection (Silero)          │
-                    │  - orchestration & interruption handling  │
-                    │  - generation fencing for barge-in        │
+                    │       LiveKit Agent (Python server)      │
+                    │  - VAD + turn detection (Silero)         │
+                    │  - orchestration & interruption handling │
+                    │  - generation fencing for barge-in       │
                     └───┬───────────────┬───────────────┬──────┘
                         │               │               │
-            ┌───────────▼──┐   ┌────────▼────────┐   ┌──▼───────────────┐
+            ┌───────────▼──┐   ┌────────▼─────────┐   ┌──▼───────────────┐
             │  ASR (STT)   │   │ Pronunciation    │   │ Coaching Logic   │
             │  Deepgram    │   │ Assessment       │   │ (rules engine):  │
             │  Nova-3      │   │ pronounce-assess │   │ decide what to   │
             │  → words +   │   │ (wav2vec2)       │   │ correct & how    │
-            │  timestamps  │   │ → per-word score  │   │                  │
+            │  timestamps  │   │ → per-word score │   │                  │
             └──────┬───────┘   └────────┬─────────┘   └──────┬───────────┘
-                   │                    │                     │
-                   └──── "what" ────────┴──── "how" ──────────┘
+                   │                    │                    │
+                   └──── "what" ────────┴──── "how" ─────────┘
                                     │
                                     ▼
-                    ┌──────────────────────────────────────────┐
-                    │   RIME TTS (primary spoken output)        │
-                    │   - normal-speed correction               │
+                    ┌────────────────────────────────────────────┐
+                    │   RIME TTS (primary spoken output)         │
+                    │   - normal-speed correction                │
                     │   - slowed word-by-word (time_scale_factor)│
-                    └──────────────────┬───────────────────────┘
+                    └──────────────────┬─────────────────────────┘
                                        │  streamed audio
                                        ▼
                               Back to browser → user hears it

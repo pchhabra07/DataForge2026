@@ -162,13 +162,24 @@ async def assess_pronunciation(
     )
 
 
-async def warmup_free_assessor() -> None:
-    """Preload the scoring model in the background so the first attempt is fast."""
+async def warmup_free_assessor(on_status=None) -> None:
+    """Preload the scoring model in the background so the first attempt is fast.
+
+    Calls on_status(status, **info) with loading, ready, or error so the
+    client can show model progress.
+    """
     loop = asyncio.get_running_loop()
+    if on_status is not None:
+        await on_status("loading")
     try:
         await loop.run_in_executor(None, _get_scorer)
     except Exception:
         logger.exception("Pronunciation model warmup failed, first attempt will load it")
+        if on_status is not None:
+            await on_status("error")
+        return
+    if on_status is not None:
+        await on_status("ready")
 
 
 def _get_scorer():

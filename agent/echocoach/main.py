@@ -160,7 +160,11 @@ async def echocoach_session(ctx: agents.JobContext):
     t1 = time.perf_counter()
     logger.info(f"Session started in {(t1 - t0) * 1000:.0f}ms")
 
-    asyncio.create_task(warmup_free_assessor())
+    asyncio.create_task(
+        warmup_free_assessor(
+            lambda status, **info: send_to_client("model_status", {"status": status, **info})
+        )
+    )
 
     # --- Helper: send JSON data to client ---
     async def send_to_client(topic: str, data: dict):
