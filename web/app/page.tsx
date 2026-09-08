@@ -159,69 +159,53 @@ export default function Home() {
   }, []);
 
   return (
-    <div className="app-container">
-      {/* Header */}
-      <header className="app-header">
-        <div className="app-logo">
-          <h1>EchoCoach</h1>
-          <span className="logo-badge">v1 · Phase 3+4</span>
+    <div className="stage">
+      <header className="rail">
+        <div className="wordmark">
+          <h1>
+            Echo<em>Coach</em>
+          </h1>
+          <span>Voice Lab · v1</span>
         </div>
-        <div className="header-status">
-          <span
-            className={`status-dot ${
-              connectionDetails ? "connected" : "disconnected"
-            }`}
-          />
-          <span>
-            {connectionDetails ? "Connected" : "Not connected"}
-          </span>
+        <div
+          className={`live-readout ${connectionDetails ? "on" : ""}`}
+        >
+          <span className="dot" />
+          <span>{connectionDetails ? "Live" : "Offline"}</span>
         </div>
       </header>
 
-      {/* Main */}
-      <main className="app-main">
+      <main style={{ display: "contents" }}>
         {!connectionDetails ? (
-          /* --- Pre-session: Connect Panel --- */
-          <div className="connect-panel fade-in">
-            <h2>
-              Hear <span className="highlight">how</span> you speak
+          <div className="hero fade-in">
+            <div className="hero-kicker">Real-time speaking coach</div>
+            <h2 className="hero-title">
+              Hear <span className="thin">how</span> you speak
             </h2>
-            <p className="subtitle">
-              EchoCoach listens while you speak, detects mispronunciations and
-              filler words, and{" "}
-              <span className="highlight">
-                immediately speaks back the correct pronunciation
-              </span>{" "}
-              using a natural human voice.
+            <p className="hero-sub">
+              EchoCoach listens while you speak, scores every word, and{" "}
+              <strong>speaks the correction back</strong> in a natural
+              human voice. Read a sentence, get flagged, hear it fixed.
             </p>
-            {error && (
-              <p
-                style={{
-                  color: "var(--accent-rose)",
-                  fontSize: 14,
-                  marginBottom: 16,
-                }}
-              >
-                ⚠ {error}
-              </p>
-            )}
+            {error && <p className="errline">{error}</p>}
             <button
-              className="btn btn-primary btn-large"
+              className="start-btn"
               onClick={handleConnect}
               disabled={isConnecting}
             >
               {isConnecting ? (
                 <>
                   <span className="spinner" />
-                  Connecting…
+                  Connecting
                 </>
               ) : (
-                <>🎙 Start Coaching Session</>
+                <>
+                  Start coaching session <span className="arrow">→</span>
+                </>
               )}
             </button>
           </div>
         ) : (
-          /* --- In-session: LiveKit Room --- */
           <LiveKitRoom
             serverUrl={connectionDetails.url}
             token={connectionDetails.token}
@@ -229,7 +213,7 @@ export default function Home() {
             video={false}
             connectOptions={{ autoSubscribe: true }}
             onDisconnected={handleDisconnect}
-            style={{ width: "100%", maxWidth: 800 }}
+            style={{ width: "100%", display: "contents" }}
           >
             <SessionView
               onDisconnect={handleDisconnect}
@@ -240,17 +224,9 @@ export default function Home() {
         )}
       </main>
 
-      {/* Footer */}
-      <footer className="app-footer">
-        EchoCoach · Powered by{" "}
-        <a href="https://rime.ai" target="_blank" rel="noopener">
-          Rime TTS
-        </a>{" "}
-        +{" "}
-        <a href="https://livekit.io" target="_blank" rel="noopener">
-          LiveKit
-        </a>
-        {" · "}DataForge 2026
+      <footer className="colophon">
+        EchoCoach · <a href="https://rime.ai" target="_blank" rel="noopener">Rime</a> +{" "}
+        <a href="https://livekit.io" target="_blank" rel="noopener">LiveKit</a> · DataForge 2026
       </footer>
     </div>
   );
@@ -266,22 +242,22 @@ function scoreClass(score: number): string {
 }
 
 function wordScoreClass(word: WordScoreData): string {
-  if (word.isFlagged || word.errorType !== "None") return "word-poor";
-  if (word.accuracyScore >= 80) return "word-good";
-  if (word.accuracyScore >= 60) return "word-fair";
-  return "word-poor";
+  if (word.isFlagged || word.errorType !== "None") return "w-poor";
+  if (word.accuracyScore >= 80) return "w-good";
+  if (word.accuracyScore >= 60) return "w-fair";
+  return "w-poor";
 }
 
 // ---------------------------------------------------------------------------
 // Session State Label
 // ---------------------------------------------------------------------------
-const STATE_LABELS: Record<SessionState, { icon: string; text: string; class: string }> = {
-  connecting: { icon: "⏳", text: "Connecting…", class: "" },
-  listening: { icon: "🎧", text: "Listening — read the sentence aloud", class: "state-listening" },
-  listening_active: { icon: "🎤", text: "Hearing you speak…", class: "state-listening" },
-  assessing: { icon: "🔍", text: "Analyzing pronunciation…", class: "state-assessing" },
-  coaching: { icon: "🎓", text: "Coach is correcting…", class: "state-coaching" },
-  idle: { icon: "✨", text: "Ready", class: "state-listening" },
+const STATE_LABELS: Record<SessionState, { text: string; class: string }> = {
+  connecting: { text: "Connecting", class: "" },
+  listening: { text: "Listening — read the sentence aloud", class: "" },
+  listening_active: { text: "Hearing you speak", class: "working" },
+  assessing: { text: "Analyzing pronunciation", class: "working" },
+  coaching: { text: "Coach is correcting", class: "working" },
+  idle: { text: "Ready", class: "" },
 };
 
 // ---------------------------------------------------------------------------
@@ -536,359 +512,223 @@ function SessionView({
   const visibleLines = lines.slice(-6);
   const isSpeaking = agentState === "speaking";
   const stateInfo = STATE_LABELS[sessionState] || STATE_LABELS.idle;
+  const deckStatus =
+    connectionState !== ConnectionState.Connected
+      ? "Connecting microphone…"
+      : sessionState === "listening"
+        ? "Mic live — read the sentence aloud"
+        : sessionState === "listening_active"
+          ? "Mic live — hearing you…"
+          : stateInfo.text;
 
   return (
-    <div className="session-panel fade-in">
-      {/* Session State Indicator */}
-      <div style={{ display: "flex", justifyContent: "center" }}>
-        <div className={`session-state ${stateInfo.class}`}>
-          {stateInfo.icon} {stateInfo.text}
-        </div>
+    <div className="console fade-in">
+      <div className={`live-readout ${stateInfo.class}`}>
+        <span className="dot" />
+        <span>{stateInfo.text}</span>
+        {isSpeaking && agentAudioTrack && (
+          <BarVisualizer
+            state={agentState}
+            trackRef={agentAudioTrack}
+            barCount={5}
+            style={{ width: 72, height: 22 }}
+          />
+        )}
       </div>
 
       {agentMissing && (
-        <div
-          className="agent-error"
-          style={{ color: "var(--accent-rose)", fontSize: 13, textAlign: "center" }}
-        >
+        <div className="agent-line">
           Agent not connected — voice actions disabled
         </div>
       )}
 
-      {/* Target Sentence Card */}
       {targetSentence && (
-        <div className="glass-card target-sentence-card">
-          <div className="target-sentence-label">Read this sentence aloud</div>
-          <div className="target-sentence-meta">
-            Sentence #{targetSentence.id}
-            <span className={`difficulty-badge ${targetSentence.difficulty}`}>
-              {targetSentence.difficulty}
+        <>
+          <div className="prompt-kicker" style={{ marginTop: 28 }}>
+            Read this aloud · #{targetSentence.id} ·{" "}
+            <span className="prompt-meta" style={{ margin: 0 }}>
+              <span className="lvl">{targetSentence.difficulty}</span>
+              <span>{targetSentence.category}</span>
             </span>
           </div>
-          <div className="target-sentence-text">
+          <div className="prompt-text">
             &ldquo;{targetSentence.text}&rdquo;
           </div>
           {pronunciation && pronunciation.recognizedText && (
-            <div className="recognized-text" style={{ fontSize: 13, marginTop: 8 }}>
-              Heard: &ldquo;{pronunciation.recognizedText}&rdquo;
+            <div className="heard-line">
+              Heard as <b>&ldquo;{pronunciation.recognizedText}&rdquo;</b>
             </div>
           )}
-          <div className="target-sentence-actions">
-            <button
-              className="btn btn-secondary"
-              onClick={handleNextSentence}
-              disabled={agentMissing}
-            >
-              ↻ Next Sentence
-            </button>
-            <button className="btn btn-secondary" onClick={handleRetry}>
-              Retry
-            </button>
-          </div>
-        </div>
+          {(!pronunciation || !pronunciation.recognizedText) && (
+            <div style={{ marginBottom: 28 }} />
+          )}
+        </>
       )}
 
-      {/* Coach Output / Audio Visualizer */}
-      <div className="glass-card coach-output">
-        <div className="coach-label">
-          {isSpeaking ? "🔊 Coach is speaking" : "🎧 Coach is listening"}
-        </div>
+      {connectionState === ConnectionState.Connecting && (
+        <div className="agent-line">Linking you to the coach…</div>
+      )}
 
-        {agentAudioTrack && (
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "center",
-              marginBottom: 16,
-            }}
-          >
-            <BarVisualizer
-              state={agentState}
-              trackRef={agentAudioTrack}
-              barCount={5}
-              style={{ width: 120, height: 48 }}
-            />
-          </div>
-        )}
-
-        <div className={`coach-text ${isSpeaking ? "speaking" : ""}`}>
-          {connectionState === ConnectionState.Connecting && (
-            <span style={{ color: "var(--text-secondary)" }}>
-              <span
-                className="spinner"
-                style={{ marginRight: 8, display: "inline-block" }}
-              />
-              Connecting to EchoCoach…
-            </span>
-          )}
-          {connectionState === ConnectionState.Connected && !isSpeaking && (
-            <span style={{ color: "var(--text-secondary)" }}>
-              Waiting for coach to respond…
-            </span>
-          )}
-          {connectionState === ConnectionState.Connected && isSpeaking && (
-            <span>Coach is speaking — listen carefully</span>
-          )}
-        </div>
-      </div>
-
-      {/* Pronunciation Results */}
       {pronunciation && (
-        <div className="glass-card pronunciation-panel fade-in">
-          <div className="pronunciation-header">
-            <span className="pronunciation-label">
-              Pronunciation Scores
-            </span>
-            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-              Flag threshold 60
-            </span>
-            <div className="score-stats">
-              <div className="score-stat">
-                Accuracy{" "}
-                <span
-                  className={`stat-value ${scoreClass(
-                    pronunciation.accuracyScore
-                  )}`}
-                >
-                  {Math.round(pronunciation.accuracyScore)}
-                </span>
-              </div>
-              <div className="score-stat">
-                Fluency{" "}
-                <span
-                  className={`stat-value ${scoreClass(
-                    pronunciation.fluencyScore
-                  )}`}
-                >
-                  {Math.round(pronunciation.fluencyScore)}
-                </span>
-              </div>
-              <div className="score-stat">
-                Completeness{" "}
-                <span
-                  className={`stat-value ${scoreClass(
-                    pronunciation.completenessScore
-                  )}`}
-                >
-                  {Math.round(pronunciation.completenessScore)}
-                </span>
-              </div>
-              {pronunciation.prosodyScore > 0 && (
-                <div className="score-stat">
-                  Prosody{" "}
-                  <span
-                    className={`stat-value ${scoreClass(
-                      pronunciation.prosodyScore
-                    )}`}
-                  >
-                    {Math.round(pronunciation.prosodyScore)}
-                  </span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Per-word scores */}
-          <div className="word-scores">
+        <div className="fade-in">
+          <div className="attempt-kicker">Your attempt · scored live</div>
+          <div className="attempt-line">
             {pronunciation.words.map((w, i) => (
-              <div key={`${w.word}-${i}`} className={`word-score ${wordScoreClass(w)}`}>
-                <span className="word-text">{w.word}</span>
-                <span className="word-accuracy">
-                  {Math.round(w.accuracyScore)}
-                </span>
-              </div>
+              <span key={`${w.word}-${i}`} className={`w ${wordScoreClass(w)}`}>
+                {w.word}
+                <sup>{Math.round(w.accuracyScore)}</sup>
+              </span>
             ))}
           </div>
 
-          {pronunciation.assessmentLatencyMs && (
-            <div className="metrics-bar" style={{ marginTop: 12 }}>
-              <div className="metric-pill">
-                Assessment{" "}
-                <span className="metric-value">
-                  {Math.round(pronunciation.assessmentLatencyMs)}ms
-                </span>
-              </div>
-              {pipelineMetrics && (
-                <>
-                  <div className="metric-pill">
-                    Total pipeline{" "}
-                    <span className="metric-value">
-                      {Math.round(pipelineMetrics.totalPipelineMs)}ms
-                    </span>
-                  </div>
-                  <div className="metric-pill">
-                    Correction{" "}
-                    <span className="metric-value">
-                      {Math.round(pipelineMetrics.correctionLatencyMs)}ms
-                    </span>
-                  </div>
-                </>
-              )}
+          <div className="score-strip">
+            <div className="score-cell">
+              Accuracy{" "}
+              <b className={scoreClass(pronunciation.accuracyScore)}>
+                {Math.round(pronunciation.accuracyScore)}
+              </b>
             </div>
-          )}
-          {!pronunciation.assessmentLatencyMs && pipelineMetrics && (
-            <div className="metrics-bar" style={{ marginTop: 12 }}>
-              <div className="metric-pill">
-                Total pipeline{" "}
-                <span className="metric-value">
-                  {Math.round(pipelineMetrics.totalPipelineMs)}ms
-                </span>
-              </div>
-              <div className="metric-pill">
-                Correction{" "}
-                <span className="metric-value">
-                  {Math.round(pipelineMetrics.correctionLatencyMs)}ms
-                </span>
-              </div>
+            <div className="score-cell">
+              Fluency{" "}
+              <b className={scoreClass(pronunciation.fluencyScore)}>
+                {Math.round(pronunciation.fluencyScore)}
+              </b>
             </div>
+            <div className="score-cell">
+              Complete{" "}
+              <b className={scoreClass(pronunciation.completenessScore)}>
+                {Math.round(pronunciation.completenessScore)}
+              </b>
+            </div>
+            {pronunciation.prosodyScore > 0 && (
+              <div className="score-cell">
+                Prosody{" "}
+                <b className={scoreClass(pronunciation.prosodyScore)}>
+                  {Math.round(pronunciation.prosodyScore)}
+                </b>
+              </div>
+            )}
+            <div className="score-cell">
+              <span className="thresh">flags under 60</span>
+            </div>
+          </div>
+
+          {pronunciation.assessmentLatencyMs ? (
+            <div className="latency-line" style={{ paddingLeft: 0, marginBottom: 24 }}>
+              scored in {Math.round(pronunciation.assessmentLatencyMs)}ms
+              {pipelineMetrics
+                ? ` · pipeline ${Math.round(pipelineMetrics.totalPipelineMs)}ms · correction ${Math.round(pipelineMetrics.correctionLatencyMs)}ms`
+                : ""}
+            </div>
+          ) : (
+            pipelineMetrics && (
+              <div className="latency-line" style={{ paddingLeft: 0, marginBottom: 24 }}>
+                pipeline {Math.round(pipelineMetrics.totalPipelineMs)}ms ·
+                correction {Math.round(pipelineMetrics.correctionLatencyMs)}ms
+              </div>
+            )
           )}
         </div>
       )}
 
-      {/* Coaching Card */}
       {coaching && (
-        <div className="glass-card coaching-card fade-in">
-          <div className="coaching-label">🎓 Coach Feedback</div>
-          <div className="coaching-text">
-            &ldquo;{coaching.coachingText}&rdquo;
+        <div className="fade-in">
+          <div className="coach-note">
+            <div className="who">Coach note · {coaching.source}</div>
+            <p>&ldquo;{coaching.coachingText}&rdquo;</p>
           </div>
           {coaching.wordsToModel.length > 0 && (
-            <div className="correction-words">
+            <div className="model-row">
               {coaching.wordsToModel.map((word, i) => (
-                <div key={`${word}-${i}`} className="correction-word">
-                  <span className="cw-text">{word}</span>
-                  <div className="cw-buttons">
-                    <button
-                      className="btn-hear"
-                      onClick={() => handleHearWord(word, "normal")}
-                      disabled={agentMissing}
-                    >
-                      🔊 Normal
-                    </button>
-                    <button
-                      className="btn-hear slow"
-                      onClick={() => handleHearWord(word, "slow")}
-                      disabled={agentMissing}
-                    >
-                      🐢 Slow
-                    </button>
-                  </div>
+                <div key={`${word}-${i}`} className="model-word">
+                  <span>{word}</span>
+                  <button
+                    onClick={() => handleHearWord(word, "normal")}
+                    disabled={agentMissing}
+                  >
+                    Play
+                  </button>
+                  <button
+                    onClick={() => handleHearWord(word, "slow")}
+                    disabled={agentMissing}
+                  >
+                    Slow
+                  </button>
                 </div>
               ))}
             </div>
           )}
           {coaching.latencyMs > 0 && (
-            <div className="metrics-bar" style={{ marginTop: 12 }}>
-              <div className="metric-pill">
-                Coaching ({coaching.source}){" "}
-                <span className="metric-value">
-                  {Math.round(coaching.latencyMs)}ms
-                </span>
-              </div>
+            <div className="latency-line">
+              coaching {Math.round(coaching.latencyMs)}ms
             </div>
           )}
         </div>
       )}
 
       {pipelineMetrics && !pronunciation && (
-        <div className="glass-card metrics-panel">
-          <div className="metrics-bar">
-            <div className="metric-pill">
-              Total pipeline{" "}
-              <span className="metric-value">
-                {Math.round(pipelineMetrics.totalPipelineMs)}ms
-              </span>
-            </div>
-            <div className="metric-pill">
-              Correction{" "}
-              <span className="metric-value">
-                {Math.round(pipelineMetrics.correctionLatencyMs)}ms
-              </span>
-            </div>
-          </div>
+        <div className="latency-line">
+          pipeline {Math.round(pipelineMetrics.totalPipelineMs)}ms · correction{" "}
+          {Math.round(pipelineMetrics.correctionLatencyMs)}ms
         </div>
       )}
 
-      {/* Live Transcript */}
-      <div className="glass-card transcript-panel">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 12,
-          }}
-        >
-          <span
-            style={{
-              fontSize: 12,
-              fontWeight: 600,
-              letterSpacing: "0.08em",
-              textTransform: "uppercase" as const,
-              color: "var(--text-secondary)",
-            }}
-          >
-            Live Transcript
-          </span>
-          <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-            {summary.wpm} WPM · {summary.fillers}{" "}
-            {summary.fillers === 1 ? "filler" : "fillers"}
-          </span>
-        </div>
-        {visibleLines.length === 0 ? (
-          <p style={{ color: "var(--text-muted)", fontSize: 14 }}>
-            Speak and your words appear here
-          </p>
-        ) : (
-          <div
-            style={{ display: "flex", flexDirection: "column", gap: 6 }}
-          >
-            {visibleLines.map((line) => (
-              <p
-                key={line.id}
-                style={{
-                  fontSize: 14,
-                  lineHeight: 1.5,
-                  margin: 0,
-                  color: line.isFinal
-                    ? "var(--text-primary)"
-                    : "var(--text-secondary)",
-                  opacity: line.isFinal ? 1 : 0.55,
-                  fontStyle: line.isFinal ? "normal" : "italic",
-                }}
-              >
-                {line.text}
-              </p>
-            ))}
-          </div>
-        )}
+      <div className="ticker-kicker" style={{ marginTop: 8 }}>
+        Live transcript
+        <span className="pace">
+          {summary.wpm} WPM · {summary.fillers}{" "}
+          {summary.fillers === 1 ? "filler" : "fillers"}
+        </span>
       </div>
-
-      {/* User Input */}
-      <div className="glass-card user-input-area">
-        <div className="audio-bars active" style={{ height: 32 }}>
-          {[...Array(5)].map((_, i) => (
-            <div key={i} className="audio-bar" />
+      {visibleLines.length === 0 ? (
+        <p className="ticker-empty">Speak and your words appear here</p>
+      ) : (
+        <div className="ticker">
+          {visibleLines.map((line, idx) => (
+            <p
+              key={line.id}
+              className={`ticker-line${line.isFinal ? " final" : ""}${
+                idx === visibleLines.length - 1 ? " latest" : ""
+              }`}
+            >
+              {line.text}
+            </p>
           ))}
         </div>
-        <div className="input-label">
-          {connectionState === ConnectionState.Connected
-            ? "Your microphone is active — speak now"
-            : "Connecting microphone…"}
-        </div>
-      </div>
+      )}
 
-      {/* Controls */}
-      <div style={{ display: "flex", justifyContent: "center", gap: 12 }}>
-        <button
-          className="btn btn-danger"
-          onClick={() => {
-            room.disconnect();
-            onDisconnect();
-          }}
-        >
-          ✕ End Session
-        </button>
+      <div className="deck">
+        <div className="deck-inner">
+          <div
+            className={`orb ${
+              connectionState === ConnectionState.Connected ? "live" : ""
+            }`}
+          >
+            <i />
+          </div>
+          <div className="deck-status">{deckStatus}</div>
+          <div className="deck-actions">
+            <button className="deck-btn" onClick={handleRetry}>
+              Retry
+            </button>
+            <button
+              className="deck-btn"
+              onClick={handleNextSentence}
+              disabled={agentMissing}
+            >
+              Next
+            </button>
+            <button
+              className="deck-btn quit"
+              onClick={() => {
+                room.disconnect();
+                onDisconnect();
+              }}
+            >
+              End
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
