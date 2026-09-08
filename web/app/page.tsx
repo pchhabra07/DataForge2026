@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
@@ -12,8 +12,13 @@ import {
 } from "@livekit/components-react";
 import { ConnectionState, RoomEvent } from "livekit-client";
 import type { Participant, TranscriptionSegment } from "livekit-client";
-import { summarize, upsertLine } from "./lib/metrics";
-import type { TranscriptLine } from "./lib/metrics";
+import {
+  summarize,
+  upsertLine,
+  formatDuration,
+  toPipelineSnapshot,
+} from "./lib/metrics";
+import type { TranscriptLine, PipelineSnapshot } from "./lib/metrics";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -49,6 +54,7 @@ interface PronunciationData {
   flaggedWords: WordScoreData[];
   hasIssues: boolean;
   assessmentLatencyMs?: number;
+  isDemo?: boolean;
 }
 
 interface CoachingData {
@@ -56,11 +62,7 @@ interface CoachingData {
   wordsToModel: string[];
   latencyMs: number;
   source: string;
-}
-
-interface PipelineMetrics {
-  totalPipelineMs: number;
-  correctionLatencyMs: number;
+  isDemo?: boolean;
 }
 
 type SessionState =
@@ -200,7 +202,7 @@ export default function Home() {
                 </>
               ) : (
                 <>
-                  Start coaching session <span className="arrow">→</span>
+                  🎤 Start Coaching Session
                 </>
               )}
             </button>
@@ -305,8 +307,29 @@ function SessionView({
   const [pronunciation, setPronunciation] = useState<PronunciationData | null>(null);
   const [coaching, setCoaching] = useState<CoachingData | null>(null);
   const [pipelineMetrics, setPipelineMetrics] =
-    useState<PipelineMetrics | null>(null);
+    useState<PipelineSnapshot | null>(null);
   const [participantVersion, setParticipantVersion] = useState(0);
+
+  // --- Phase 5: Skip/interruption state ---
+  const [showSkippedToast, setShowSkippedToast] = useState(false);
+
+  // --- Phase 6: Slow-mode toggle ---
+  const [slowMode, setSlowMode] = useState(false);
+
+  // --- Phase 6: Session timer ---
+  const sessionStartRef = useRef<number>(Date.now());
+  const [sessionElapsed, setSessionElapsed] = useState(0);
+
+  // --- Phase 6: Metrics panel toggle ---
+  const [showMetrics, setShowMetrics] = useState(false);
+
+  // Session timer tick
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setSessionElapsed(Date.now() - sessionStartRef.current);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   // --- Fallback transcript handler ---
   useEffect(() => {
@@ -384,6 +407,7 @@ function SessionView({
               Number.isFinite(raw.assessmentLatencyMs)
                 ? raw.assessmentLatencyMs
                 : undefined,
+            isDemo: raw.isDemo === true,
           };
           setPronunciation(parsed);
           if (!parsed.hasIssues) {
@@ -398,6 +422,7 @@ function SessionView({
             wordsToModel: toStringList(raw.wordsToModel),
             latencyMs: toNumberValue(raw.latencyMs, 0),
             source: toStringValue(raw.source, ""),
+            isDemo: raw.isDemo === true,
           });
           break;
         }
@@ -414,10 +439,13 @@ function SessionView({
         }
         case "metrics": {
           if (participant && !isAgentParticipant(participant)) return;
-          setPipelineMetrics({
-            totalPipelineMs: toNumberValue(raw.totalPipelineMs, 0),
-            correctionLatencyMs: toNumberValue(raw.correctionLatencyMs, 0),
-          });
+          setPipelineMetrics(toPipelineSnapshot(raw));
+          break;
+        }
+        case "interruption": {
+          // Phase 5: show skipped toast
+          setShowSkippedToast(true);
+          setTimeout(() => setShowSkippedToast(false), 2000);
           break;
         }
       }
@@ -497,17 +525,37 @@ function SessionView({
           console.warn("No agent participant found for RPC");
           return;
         }
+        // Phase 6: respect slow-mode toggle
+        const effectiveSpeed = slowMode ? "slow" : speed;
         await room.localParticipant.performRpc({
           destinationIdentity: agent.identity,
           method: "hear_word",
-          payload: JSON.stringify({ word, speed }),
+          payload: JSON.stringify({ word, speed: effectiveSpeed }),
         });
       } catch (e) {
         console.error("hear_word RPC failed:", e);
       }
     },
-    [room, agentParticipant]
+    [room, agentParticipant, slowMode]
   );
+
+  // --- Phase 5: RPC: Skip correction ---
+  const handleSkipCorrection = useCallback(async () => {
+    try {
+      const agent = agentParticipant;
+      if (!agent) {
+        console.warn("No agent participant found for RPC");
+        return;
+      }
+      await room.localParticipant.performRpc({
+        destinationIdentity: agent.identity,
+        method: "skip_correction",
+        payload: "",
+      });
+    } catch (e) {
+      console.error("skip_correction RPC failed:", e);
+    }
+  }, [room, agentParticipant]);
 
   const visibleLines = lines.slice(-6);
   const isSpeaking = agentState === "speaking";
@@ -523,9 +571,16 @@ function SessionView({
 
   return (
     <div className="console fade-in">
+      {/* Phase 5: Skipped toast */}
+      {showSkippedToast && (
+        <div className="skip-toast fade-in">⏭ Skipped</div>
+      )}
+
       <div className={`live-readout ${stateInfo.class}`}>
         <span className="dot" />
         <span>{stateInfo.text}</span>
+        {/* Phase 6: Session timer */}
+        <span className="session-timer">{formatDuration(sessionElapsed)}</span>
         {isSpeaking && agentAudioTrack && (
           <BarVisualizer
             state={agentState}
@@ -554,12 +609,12 @@ function SessionView({
           <div className="prompt-text">
             &ldquo;{targetSentence.text}&rdquo;
           </div>
-          {pronunciation && pronunciation.recognizedText && (
+          {pronunciation && pronunciation.recognizedText && !pronunciation.isDemo && (
             <div className="heard-line">
               Heard as <b>&ldquo;{pronunciation.recognizedText}&rdquo;</b>
             </div>
           )}
-          {(!pronunciation || !pronunciation.recognizedText) && (
+          {(!pronunciation || !pronunciation.recognizedText || pronunciation.isDemo) && (
             <div style={{ marginBottom: 28 }} />
           )}
         </>
@@ -571,12 +626,37 @@ function SessionView({
 
       {pronunciation && (
         <div className="fade-in">
-          <div className="attempt-kicker">Your attempt · scored live</div>
+          <div className="attempt-kicker">
+            {pronunciation.isDemo ? "Example scoring · try it yourself" : "Your attempt · scored live"}
+          </div>
+
+          {/* Phase 6: Truth-beside-estimate layout */}
           <div className="attempt-line">
             {pronunciation.words.map((w, i) => (
               <span key={`${w.word}-${i}`} className={`w ${wordScoreClass(w)}`}>
                 {w.word}
                 <sup>{Math.round(w.accuracyScore)}</sup>
+                {/* Inline Play/Slow for flagged words (truth beside estimate) */}
+                {w.isFlagged && (
+                  <span className="inline-btns">
+                    <button
+                      className="inline-play"
+                      onClick={() => handleHearWord(w.word, "normal")}
+                      disabled={agentMissing}
+                      title="Hear correct pronunciation"
+                    >
+                      ▶
+                    </button>
+                    <button
+                      className="inline-play"
+                      onClick={() => handleHearWord(w.word, "slow")}
+                      disabled={agentMissing}
+                      title="Hear it slowly"
+                    >
+                      🐢
+                    </button>
+                  </span>
+                )}
               </span>
             ))}
           </div>
@@ -613,7 +693,7 @@ function SessionView({
             </div>
           </div>
 
-          {pronunciation.assessmentLatencyMs ? (
+          {pronunciation.assessmentLatencyMs && !pronunciation.isDemo ? (
             <div className="latency-line" style={{ paddingLeft: 0, marginBottom: 24 }}>
               scored in {Math.round(pronunciation.assessmentLatencyMs)}ms
               {pipelineMetrics
@@ -621,7 +701,7 @@ function SessionView({
                 : ""}
             </div>
           ) : (
-            pipelineMetrics && (
+            !pronunciation.isDemo && pipelineMetrics && (
               <div className="latency-line" style={{ paddingLeft: 0, marginBottom: 24 }}>
                 pipeline {Math.round(pipelineMetrics.totalPipelineMs)}ms ·
                 correction {Math.round(pipelineMetrics.correctionLatencyMs)}ms
@@ -634,7 +714,10 @@ function SessionView({
       {coaching && (
         <div className="fade-in">
           <div className="coach-note">
-            <div className="who">Coach note · {coaching.source}</div>
+            <div className="who">
+              Coach note · {coaching.source}
+              {coaching.isDemo && " · demo"}
+            </div>
             <p>&ldquo;{coaching.coachingText}&rdquo;</p>
           </div>
           {coaching.wordsToModel.length > 0 && (
@@ -658,7 +741,7 @@ function SessionView({
               ))}
             </div>
           )}
-          {coaching.latencyMs > 0 && (
+          {coaching.latencyMs > 0 && !coaching.isDemo && (
             <div className="latency-line">
               coaching {Math.round(coaching.latencyMs)}ms
             </div>
@@ -666,10 +749,53 @@ function SessionView({
         </div>
       )}
 
-      {pipelineMetrics && !pronunciation && (
-        <div className="latency-line">
-          pipeline {Math.round(pipelineMetrics.totalPipelineMs)}ms · correction{" "}
-          {Math.round(pipelineMetrics.correctionLatencyMs)}ms
+      {/* Phase 6: Metrics dashboard panel */}
+      {pipelineMetrics && (
+        <div className="fade-in">
+          <button
+            className="metrics-toggle"
+            onClick={() => setShowMetrics((v) => !v)}
+          >
+            {showMetrics ? "▾ Hide metrics" : "▸ Show metrics"}
+          </button>
+          {showMetrics && (
+            <div className="metrics-panel">
+              <table>
+                <tbody>
+                  <tr>
+                    <td>Attempt</td>
+                    <td>#{pipelineMetrics.attemptNumber}</td>
+                  </tr>
+                  <tr>
+                    <td>Assessment</td>
+                    <td>{Math.round(pipelineMetrics.assessmentLatencyMs)}ms (avg {Math.round(pipelineMetrics.avgAssessmentMs)}ms)</td>
+                  </tr>
+                  <tr>
+                    <td>Correction</td>
+                    <td>{Math.round(pipelineMetrics.correctionLatencyMs)}ms (avg {Math.round(pipelineMetrics.avgCorrectionMs)}ms)</td>
+                  </tr>
+                  <tr>
+                    <td>Total pipeline</td>
+                    <td>{Math.round(pipelineMetrics.totalPipelineMs)}ms (avg {Math.round(pipelineMetrics.avgTotalPipelineMs)}ms)</td>
+                  </tr>
+                  {pipelineMetrics.lastInterruptionMs != null && (
+                    <tr>
+                      <td>Interruption stop</td>
+                      <td>{Math.round(pipelineMetrics.lastInterruptionMs)}ms (avg {Math.round(pipelineMetrics.avgInterruptionMs)}ms)</td>
+                    </tr>
+                  )}
+                  <tr>
+                    <td>Flagged words</td>
+                    <td>{pipelineMetrics.flaggedWordCount}</td>
+                  </tr>
+                  <tr>
+                    <td>Source</td>
+                    <td>{pipelineMetrics.correctionSource}{pipelineMetrics.isCached ? " (cached)" : ""}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
@@ -708,9 +834,27 @@ function SessionView({
           </div>
           <div className="deck-status">{deckStatus}</div>
           <div className="deck-actions">
-            <button className="deck-btn" onClick={handleRetry}>
-              Retry
+            {/* Phase 6: Slow-mode toggle */}
+            <button
+              className={`deck-btn toggle-btn ${slowMode ? "active" : ""}`}
+              onClick={() => setSlowMode((v) => !v)}
+              title={slowMode ? "Slow mode ON" : "Slow mode OFF"}
+            >
+              🐢 {slowMode ? "Slow" : "Normal"}
             </button>
+            <button className="deck-btn" onClick={handleRetry}>
+              Try again ↺
+            </button>
+            {/* Phase 5: Skip button (visible during coaching) */}
+            {sessionState === "coaching" && (
+              <button
+                className="deck-btn skip-btn"
+                onClick={handleSkipCorrection}
+                disabled={agentMissing}
+              >
+                Skip ⏭
+              </button>
+            )}
             <button
               className="deck-btn"
               onClick={handleNextSentence}

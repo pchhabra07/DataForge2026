@@ -1,0 +1,28 @@
+{
+  "variant": 2,
+  "description": "Exclamation mark ending — tests emphasis change in delivery",
+  "sentence": {
+    "id": 7,
+    "text": "The pharmaceutical company developed an extraordinarily effective vaccine!",
+    "difficulty": "hard",
+    "category": "technical"
+  },
+  "rime_config": {
+    "model": "coda",
+    "voice": "celeste",
+    "language": "en",
+    "speed_alpha": 1.0,
+    "slow_time_scale_factor": 1.5,
+    "transport": "livekit_websocket"
+  },
+  "audio_clips": {
+    "normal": "fixtures/variant_2_normal.mp3",
+    "slow": "fixtures/variant_2_slow.mp3"
+  },
+  "measured_latency": {
+    "first_byte_ms": null,
+    "total_synthesis_ms": null,
+    "note": "Fill after measurement run"
+  },
+  "delivery_notes": "Exclamation mark changes Rime's delivery to a slightly rising/emphatic intonation on 'vaccine!'. Compare with variant_1 (period) to show how punctuation affects spoken delivery. This is required evidence per the PRD: 'note which wording/punctuation changed the delivery'."
+}

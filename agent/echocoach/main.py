@@ -1,5 +1,5 @@
 """
-EchoCoach — LiveKit Agent Entry Point (Phase 3+4)
+EchoCoach — LiveKit Agent Entry Point (Phase 5+6)
 
 This agent joins a LiveKit room, presents target sentences for reading practice,
 captures user audio, runs free on-device pronunciation assessment, generates
@@ -7,6 +7,8 @@ coaching feedback via LLM, and speaks corrections using Rime TTS (normal + slow 
 
 Phase 3: pronunciation assessment with per-word scoring
 Phase 4: coaching logic + corrective Rime at normal/slow speed
+Phase 5: interruption / barge-in with generation fencing
+Phase 6: preset-already-running, metrics measurement, polish
 """
 
 from __future__ import annotations
@@ -24,7 +26,12 @@ from livekit.agents import Agent, AgentServer, AgentSession, RoomInputOptions
 from livekit.plugins import deepgram, rime, silero
 
 from echocoach.coaching import generate_correction
-from echocoach.pronunciation import assess_pronunciation, warmup_free_assessor
+from echocoach.measure import MetricsSample, SessionMetrics
+from echocoach.pronunciation import (
+    _mock_pronunciation_assessment,
+    assess_pronunciation,
+    warmup_free_assessor,
+)
 from echocoach.sentences import get_first_sentence, get_next_sentence
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env.local"))
@@ -48,7 +55,8 @@ LIVEKIT_SAMPLE_RATE = 48000
 class EchoCoachAgent(Agent):
     """EchoCoach speaking coach agent.
 
-    Phase 3+4: pronunciation assessment + coaching corrections via Rime.
+    Phase 5+6: pronunciation assessment + coaching corrections via Rime
+    with barge-in support and generation fencing.
     """
 
     def __init__(self) -> None:
@@ -76,12 +84,20 @@ async def echocoach_session(ctx: agents.JobContext):
     3. On speech end: run pronunciation assessment
     4. If issues found: generate coaching + speak correction via Rime
     5. Send all results to client via data messages
+    6. Handle barge-in: stop TTS, fence stale corrections
     """
     t0 = time.perf_counter()
     logger.info("EchoCoach session starting…")
 
     # Track current target sentence
     current_sentence = get_first_sentence()
+
+    # --- Phase 5: Generation fence for barge-in ---
+    # Each correction run gets a generation number. Before any say() or
+    # send_to_client() in the coaching path, check that the current gen
+    # hasn't been superseded. If it has, bail silently.
+    correction_gen = 0
+    session_metrics = SessionMetrics()
 
     # --- Build agent session with Rime TTS ---
     session = AgentSession(
@@ -151,6 +167,59 @@ async def echocoach_session(ctx: agents.JobContext):
         except Exception:
             logger.exception("Failed to send data to client (topic=%s)", topic)
 
+    # --- Phase 5: Generation-fenced say helper ---
+    async def say_fenced(text: str, gen: int) -> bool:
+        """Speak text via Rime, but bail if generation has been superseded.
+
+        Returns True if the speech completed, False if fenced out.
+        """
+        if gen != correction_gen:
+            logger.debug("Fenced out say() for gen %d (current=%d)", gen, correction_gen)
+            return False
+        await session.say(text)
+        return gen == correction_gen
+
+    async def say_slow_fenced(text: str, gen: int) -> bool:
+        """Speak text at slow speed, but bail if generation has been superseded."""
+        if gen != correction_gen:
+            logger.debug("Fenced out slow say() for gen %d (current=%d)", gen, correction_gen)
+            return False
+        await say_slow(text)
+        return gen == correction_gen
+
+    # --- Phase 5: Interrupt helper ---
+    async def interrupt_coaching(source: str = "unknown"):
+        """Stop current coaching output and fence stale corrections."""
+        nonlocal correction_gen
+        t_interrupt = time.perf_counter()
+        correction_gen += 1
+        logger.info(
+            "Interrupting coaching (source=%s, new_gen=%d)",
+            source,
+            correction_gen,
+        )
+
+        # Try to interrupt the session's current speech
+        try:
+            session.interrupt()
+        except Exception:
+            logger.debug("session.interrupt() not available or failed")
+
+        # Measure and record interruption latency
+        interrupt_ms = (time.perf_counter() - t_interrupt) * 1000
+        session_metrics.record_interruption(interrupt_ms)
+
+        await send_to_client("state", {"state": "listening"})
+        await send_to_client(
+            "interruption",
+            {
+                "interruptionMs": round(interrupt_ms, 1),
+                "source": source,
+                "gen": correction_gen,
+            },
+        )
+        logger.info("Interruption complete in %.1fms (source=%s)", interrupt_ms, source)
+
     # --- Send initial target sentence ---
     await send_to_client(
         "sentence",
@@ -172,6 +241,32 @@ async def echocoach_session(ctx: agents.JobContext):
     t_done = time.perf_counter()
     logger.info(f"Rime greeting latency: {(t_done - t_speak) * 1000:.0f}ms")
 
+    # --- Phase 6: Send pre-scored demo state ("preset already running") ---
+    demo_result = _mock_pronunciation_assessment(current_sentence.text)
+    demo_data = demo_result.to_dict()
+    demo_data["isDemo"] = True
+    demo_data["assessmentLatencyMs"] = 0
+    await send_to_client("pronunciation", demo_data)
+
+    # Send demo coaching for the flagged words
+    if demo_result.has_issues:
+        flagged_words_text = [w.word for w in demo_result.flagged_words]
+        demo_coaching_text = (
+            f"I noticed the word '{flagged_words_text[0]}' could use some "
+            f"practice. Try reading the sentence aloud and I'll score your "
+            f"pronunciation!"
+        )
+        await send_to_client(
+            "coaching",
+            {
+                "coachingText": demo_coaching_text,
+                "wordsToModel": flagged_words_text[:3],
+                "latencyMs": 0,
+                "source": "demo",
+                "isDemo": True,
+            },
+        )
+
     # --- Audio capture buffer ---
     # One utterance is assessed and coached at a time so slow speech
     # never overlaps itself when the user speaks rapidly.
@@ -188,6 +283,8 @@ async def echocoach_session(ctx: agents.JobContext):
     @ctx.room.local_participant.register_rpc_method("next_sentence")
     async def handle_next_sentence(data: rtc.RpcInvocationData):
         nonlocal current_sentence
+        # Interrupt any ongoing coaching
+        await interrupt_coaching("next_sentence")
         current_sentence = get_next_sentence(current_sentence.id)
         await send_to_client(
             "sentence",
@@ -221,6 +318,13 @@ async def echocoach_session(ctx: agents.JobContext):
             logger.exception("hear_word RPC error")
             return json.dumps({"error": str(e)})
 
+    # --- Phase 5: Skip correction RPC ---
+    @ctx.room.local_participant.register_rpc_method("skip_correction")
+    async def handle_skip_correction(data: rtc.RpcInvocationData):
+        """Client pressed Skip — stop coaching, fence stale corrections."""
+        await interrupt_coaching("skip_button")
+        return json.dumps({"ok": True, "gen": correction_gen})
+
     # --- Process user audio for pronunciation assessment ---
     @_serialize_utterances
     async def process_utterance(audio_data: bytes):
@@ -232,7 +336,7 @@ async def echocoach_session(ctx: agents.JobContext):
             await send_to_client("state", {"state": "listening"})
 
     async def _process_utterance_inner(audio_data: bytes):
-        nonlocal current_sentence
+        nonlocal current_sentence, correction_gen
 
         if len(audio_data) < 4800:  # Too short
             logger.debug("Utterance too short (%d bytes), skipping", len(audio_data))
@@ -267,10 +371,15 @@ async def echocoach_session(ctx: agents.JobContext):
         # Send pronunciation results to client
         result_data = result.to_dict()
         result_data["assessmentLatencyMs"] = round(assess_ms, 1)
+        result_data["isDemo"] = False
         await send_to_client("pronunciation", result_data)
 
-        # --- Phase 4: Generate and speak coaching correction ---
+        # --- Phase 4+5: Generate and speak coaching correction (fenced) ---
         if result.has_issues:
+            # Bump generation for this correction run
+            correction_gen += 1
+            my_gen = correction_gen
+
             await send_to_client("state", {"state": "coaching"})
 
             # Generate coaching plan
@@ -280,19 +389,31 @@ async def echocoach_session(ctx: agents.JobContext):
                 reference_text=current_sentence.text,
             )
 
+            # Check fence before sending coaching data
+            if my_gen != correction_gen:
+                logger.info("Correction fenced out (gen %d != %d)", my_gen, correction_gen)
+                return
+
             # Send coaching plan to client
             correction_data = correction.to_dict()
+            correction_data["isDemo"] = False
             await send_to_client("coaching", correction_data)
 
-            # Speak the coaching feedback via Rime (normal speed)
+            # Speak the coaching feedback via Rime (normal speed), fenced
             t_correction_start = time.perf_counter()
-            await session.say(correction.coaching_text)
+            if not await say_fenced(correction.coaching_text, my_gen):
+                logger.info("Coaching speech interrupted at coaching_text")
+                return
 
-            # Speak each flagged word at normal speed, then slow
+            # Speak each flagged word at normal speed, then slow — fenced
             for word in correction.words_to_model:
-                await session.say(f"The word is: {word}")
+                if not await say_fenced(f"The word is: {word}", my_gen):
+                    logger.info("Coaching speech interrupted at word '%s'", word)
+                    return
                 await asyncio.sleep(0.3)  # Brief pause
-                await say_slow(f"Now slowly: {word}")
+                if not await say_slow_fenced(f"Now slowly: {word}", my_gen):
+                    logger.info("Coaching slow speech interrupted at word '%s'", word)
+                    return
                 await asyncio.sleep(0.3)
 
             t_correction_end = time.perf_counter()
@@ -305,20 +426,30 @@ async def echocoach_session(ctx: agents.JobContext):
                 total_ms,
             )
 
-            await send_to_client(
-                "metrics",
-                {
-                    "assessmentLatencyMs": round(assess_ms, 1),
-                    "correctionLatencyMs": round(correction_ms, 1),
-                    "totalPipelineMs": round(total_ms, 1),
-                    "correctionSource": correction.source,
-                },
+            # Record metrics
+            sample = MetricsSample(
+                assessment_ms=assess_ms,
+                correction_ms=correction_ms,
+                total_pipeline_ms=total_ms,
+                flagged_word_count=len(result.flagged_words),
+                correction_source=correction.source,
             )
+            session_metrics.record(sample)
 
-            await session.say("Now try reading the sentence again!")
+            # Send enriched metrics to client
+            if my_gen == correction_gen:
+                await send_to_client("metrics", session_metrics.latest_dict())
+                await say_fenced("Now try reading the sentence again!", my_gen)
         else:
             # No issues — encourage and move on
+            sample = MetricsSample(
+                assessment_ms=assess_ms,
+                flagged_word_count=0,
+                correction_source="none",
+            )
+            session_metrics.record(sample)
             await session.say("Excellent pronunciation! You nailed that sentence. Well done!")
+            await send_to_client("metrics", session_metrics.latest_dict())
 
         await send_to_client("state", {"state": "listening"})
 
@@ -361,6 +492,11 @@ async def echocoach_session(ctx: agents.JobContext):
                                 if not speech_active:
                                     speech_active = True
                                     speech_frames = []
+                                    # Phase 5: interrupt coaching when user starts speaking
+                                    if correction_gen > 0:
+                                        asyncio.create_task(
+                                            interrupt_coaching("user_speech")
+                                        )
                                     await send_to_client("state", {"state": "listening_active"})
                                     logger.debug("Speech started")
                                 silence_count = 0

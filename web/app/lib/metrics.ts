@@ -95,3 +95,59 @@ export function summarize(lines: TranscriptLine[]): { words: number; fillers: nu
   }
   return { words, fillers, wpm: computeWpm(spanWords, elapsed) };
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6: Pipeline metrics accumulator (client-side)
+// ---------------------------------------------------------------------------
+
+export interface PipelineSnapshot {
+  assessmentLatencyMs: number;
+  correctionLatencyMs: number;
+  totalPipelineMs: number;
+  correctionSource: string;
+  flaggedWordCount: number;
+  isCached: boolean;
+  attemptNumber: number;
+  lastInterruptionMs?: number;
+  avgAssessmentMs: number;
+  avgCorrectionMs: number;
+  avgTotalPipelineMs: number;
+  avgInterruptionMs: number;
+}
+
+export function toPipelineSnapshot(raw: Record<string, unknown>): PipelineSnapshot {
+  const num = (k: string, fallback = 0) => {
+    const v = raw[k];
+    return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  };
+  const str = (k: string, fallback = "") => {
+    const v = raw[k];
+    return typeof v === "string" ? v : fallback;
+  };
+  return {
+    assessmentLatencyMs: num("assessmentLatencyMs"),
+    correctionLatencyMs: num("correctionLatencyMs"),
+    totalPipelineMs: num("totalPipelineMs"),
+    correctionSource: str("correctionSource", "rules"),
+    flaggedWordCount: num("flaggedWordCount"),
+    isCached: raw.isCached === true,
+    attemptNumber: num("attemptNumber", 1),
+    lastInterruptionMs: raw.lastInterruptionMs != null ? num("lastInterruptionMs") : undefined,
+    avgAssessmentMs: num("avgAssessmentMs"),
+    avgCorrectionMs: num("avgCorrectionMs"),
+    avgTotalPipelineMs: num("avgTotalPipelineMs"),
+    avgInterruptionMs: num("avgInterruptionMs"),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6: Session timer formatter
+// ---------------------------------------------------------------------------
+
+export function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+

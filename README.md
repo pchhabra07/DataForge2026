@@ -1,8 +1,8 @@
 # EchoCoach — Real-Time Speaking Coach
 
-> **EchoCoach** listens while you speak, detects *how* you spoke (pronunciation, filler words, pace, fluency) — not just *what* you said — and immediately models the correct version back to you in a natural human voice using **Rime TTS**.
+**EchoCoach** listens while you speak, scores every word, and **speaks the correction back** in a natural human voice using [Rime TTS](https://rime.ai). Read a sentence, get flagged, hear it fixed.
 
-🏆 **DataForge 2026 — Rime Hackathon Challenge**
+> *When a user mispronounces a target word, EchoCoach detects it within ~1 second and speaks back the correct pronunciation using Rime — first at normal speed, then slowed down word-by-word — so the user can immediately repeat and match it.*
 
 ---
 
@@ -10,141 +10,202 @@
 
 ### Prerequisites
 
-- Python ≥ 3.10
-- Node.js ≥ 20
-- ffmpeg installed and on PATH (audio decode for scoring)
-- A [LiveKit Cloud](https://cloud.livekit.io) account (free tier)
-- API keys: Rime, Deepgram, OpenAI (see `.env.example`)
-- Pronunciation scoring is free and on-device, no key needed.
-  First run downloads a ~1.2GB model to the HuggingFace cache.
+- **Node.js** ≥ 18 (for web client)
+- **Python** ≥ 3.10 (for agent)
+- **ffmpeg** installed on PATH (for audio processing)
+- API keys for: **Rime**, **Deepgram**, **LiveKit** (free tiers work)
 
-### 1. Clone & Configure
+### Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/DataForge2026.git
+# 1. Clone the repo
+git clone https://github.com/pchhabra07/DataForge2026.git
 cd DataForge2026
+
+# 2. Create .env.local from the example (fill in your keys)
 cp .env.example .env.local
-# Fill in your API keys in .env.local
-```
+cp .env.local web/.env.local   # Next.js needs its own copy
 
-### 2. Agent (Python)
-
-```bash
+# 3. Start the Python agent
 cd agent
 python -m venv .venv
-```
-
-Activate the venv every time before running the agent:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-```bash
+# Windows:
+.venv\Scripts\activate
+# Linux/Mac:
+# source .venv/bin/activate
 pip install -e ".[dev]"
-```
+python -m echocoach.main dev
 
-### 3. Web Client (Next.js)
-
-```bash
+# 4. In another terminal — start the web client
 cd web
 npm install
-```
-
-### 4. Run Rime Preflight (do this first!)
-
-```bash
-python scripts/rime_preflight.py
-```
-
-This validates your Rime API key, model, voice, and speed control work.
-
-### 5. Start the Agent
-
-Keep this terminal running. Open a new terminal for the web client.
-
-```bash
-cd agent
-.\.venv\Scripts\Activate.ps1
-python -m echocoach.main dev
-```
-
-### 6. Start the Web Client
-
-```bash
-cd web
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Open **http://localhost:3000**, click "Start Coaching Session", and speak!
 
 ---
 
 ## Architecture
 
 ```
-User speaks → Browser (mic, UI, audio playback)
-                    ↓ WebRTC via LiveKit
-              LiveKit Agent (Python)
-               ├── STT: Deepgram (words + timestamps)
-               ├── Pronunciation: free on-device engine (wav2vec2 phonemes)
-               ├── Coaching Logic: LLM (error selection, rules fallback)
-               └── TTS: Rime (primary spoken output)
-                    ↓ streamed audio
-              Back to browser → user hears correction
+                    ┌──────────────────────────────────────────┐
+   User speaks →    │  Browser client (mic capture, UI, audio)  │
+                    └───────────────┬──────────────────────────┘
+                                    │  audio (WebRTC / LiveKit)
+                                    ▼
+                    ┌──────────────────────────────────────────┐
+                    │       LiveKit Agent (Python server)       │
+                    │  - VAD + turn detection (Silero)          │
+                    │  - orchestration & interruption handling  │
+                    │  - generation fencing for barge-in        │
+                    └───┬───────────────┬───────────────┬──────┘
+                        │               │               │
+            ┌───────────▼──┐   ┌────────▼────────┐   ┌──▼───────────────┐
+            │  ASR (STT)   │   │ Pronunciation    │   │ Coaching Logic   │
+            │  Deepgram    │   │ Assessment       │   │ (LLM + rules):   │
+            │  Nova-3      │   │ pronounce-assess │   │ decide what to   │
+            │  → words +   │   │ (wav2vec2)       │   │ correct & how    │
+            │  timestamps  │   │ → per-word score  │   │                  │
+            └──────┬───────┘   └────────┬─────────┘   └──────┬───────────┘
+                   │                    │                     │
+                   └──── "what" ────────┴──── "how" ──────────┘
+                                    │
+                                    ▼
+                    ┌──────────────────────────────────────────┐
+                    │   RIME TTS (primary spoken output)        │
+                    │   - normal-speed correction               │
+                    │   - slowed word-by-word (time_scale_factor)│
+                    └──────────────────┬───────────────────────┘
+                                       │  streamed audio
+                                       ▼
+                              Back to browser → user hears it
 ```
+
+---
+
+## Third-Party Services
+
+| Layer | Service | Purpose | Cost |
+|-------|---------|---------|------|
+| **Transport** | [LiveKit](https://livekit.io) | WebRTC rooms, agent orchestration, turn detection | Free tier |
+| **STT** | [Deepgram](https://deepgram.com) Nova-3 | Word-level transcription + timestamps + fillers | Free tier |
+| **Pronunciation** | [pronounce-assess](https://github.com/thenomadlad/pronounce-assess) (wav2vec2) | Per-word accuracy scoring | Free, on-device |
+| **TTS** | [Rime](https://rime.ai) Coda | **Primary spoken output** — corrections, word modeling, slow delivery | API key |
+| **LLM** | OpenAI (optional) | Natural coaching phrasing | Optional, rules fallback |
+
+---
 
 ## Rime Configuration
 
 | Parameter | Value |
 |-----------|-------|
-| Model | `coda` (primary), `mistv3` (fallback) |
-| Voice | `celeste` |
-| Language | `en` |
-| Audio | Streamed PCM/L16 via WebSocket |
-| Transport | LiveKit (WebRTC) |
-| Speed | `speed_alpha > 1.0` for slowed coaching |
+| **Model** | `coda` |
+| **Speaker/Voice** | `celeste` |
+| **Language** | `en` |
+| **Audio format** | Streamed PCM/L16 |
+| **Transport** | LiveKit (WebRTC) |
+| **Normal speed** | `speed_alpha = 1.0` |
+| **Slow coaching** | `time_scale_factor = 1.5` |
+| **WebSocket** | Yes (normal); HTTP one-shot (slow) |
+
+Rime is the **primary spoken output**. Every correction is spoken by Rime. Removing the spoken output makes the product collapse into a scorecard — the lesson *is* the sound.
+
+---
+
+## Features
+
+### Core Loop
+- **Reading mode**: curated target sentences from easy to tongue-twister
+- **Per-word scoring**: accuracy, fluency, completeness, prosody
+- **Coaching corrections**: flagged words spoken back via Rime (normal + slow)
+- **Re-attempt loop**: speak again, see scores update in real time
+
+### Barge-in / Interruption (Phase 5)
+- **Full-duplex**: mic keeps recording while Rime speaks
+- **Skip button**: stops coaching audio within ≤300ms
+- **Generation fencing**: stale corrections cannot re-enter the conversation
+- **Voice barge-in**: speaking while coach is correcting auto-interrupts
+
+### Polish (Phase 6)
+- **Preset already running**: opens with a pre-scored example (no blank canvas)
+- **Truth beside estimate**: flagged words show inline Play/Slow buttons
+- **Slow-mode toggle**: global toggle for all Rime output
+- **Metrics dashboard**: collapsible panel with latency averages
+- **Session timer**: elapsed time in header
+
+---
+
+## Known Limitations
+
+1. **English only** — `en-US` single language for v1
+2. **Reading mode only** — free-speak not scored (no reference text)
+3. **On-device model size** — wav2vec2 model is ~1.2GB, first run downloads it
+4. **ffmpeg required** — audio resampling depends on ffmpeg being on PATH
+5. **No persistent sessions** — scores reset when you disconnect
+6. **LLM optional** — without `OPENAI_API_KEY`, coaching uses rules-based fallback (still functional, less natural phrasing)
+
+---
+
+## Failure Behavior
+
+| Scenario | Behavior |
+|----------|----------|
+| Rime API down | Agent fails to speak; error logged; client shows "Agent not connected" |
+| Deepgram API down | No transcription; pronunciation assessment still runs on raw audio |
+| Pronunciation model fails to load | Falls back to mock assessment for UI testing |
+| LLM timeout (>2s) | Falls back to rules-based coaching (instant) |
+| User barge-in during correction | Audio stops ≤300ms; stale corrections fenced out |
+| Very short utterance (<100ms) | Silently dropped, no assessment attempted |
+
+---
 
 ## Project Structure
 
 ```
 DataForge2026/
-├── agent/              # Python LiveKit agent
-│   ├── echocoach/      # Agent source code
-│   └── pyproject.toml  # Python dependencies
-├── web/                # Next.js web client
-│   ├── app/            # App Router pages & API
-│   └── package.json    # Node dependencies
-├── scripts/            # Utility scripts
-│   ├── rime_preflight.py
-│   └── generate_token.py
-├── fixtures/           # Recorded audio fixtures
-├── docs/               # PRD, implementation plan, evidence
-│   ├── PRD.md
+├── agent/                  # Python LiveKit agent
+│   ├── echocoach/
+│   │   ├── main.py         # Agent entry point, session handler
+│   │   ├── coaching.py     # LLM + rules coaching logic
+│   │   ├── pronunciation.py # On-device wav2vec2 scoring
+│   │   ├── measure.py      # Session metrics accumulator
+│   │   └── sentences.py    # Target sentence bank
+│   └── pyproject.toml
+├── web/                    # Next.js web client
+│   ├── app/
+│   │   ├── page.tsx        # Main UI
+│   │   ├── globals.css     # Console-style design system
+│   │   ├── lib/metrics.ts  # WPM, fillers, pipeline metrics
+│   │   └── api/token/      # LiveKit token endpoint
+│   └── package.json
+├── docs/
+│   ├── PRD.md              # Product requirements
 │   ├── IMPLEMENTATION_PLAN.md
-│   └── RIME_EVIDENCE.md
-├── .env.example        # API key placeholders (no secrets!)
-└── .gitignore
+│   └── RIME_EVIDENCE.md    # Hard voice problem evidence
+├── fixtures/               # Test clips, variants, measurements
+├── scripts/                # Preflight, token gen, latency measurement
+├── .env.example            # Template (no secrets)
+└── README.md               # This file
 ```
 
-## Third-Party Services
+---
 
-| Service | Purpose | Required |
-|---------|---------|----------|
-| [Rime](https://rime.ai) | TTS — primary spoken output | ✅ |
-| [LiveKit](https://livekit.io) | WebRTC transport & orchestration | ✅ |
-| [Deepgram](https://deepgram.com) | Speech-to-text (word timestamps) | ✅ |
-| pronounce-assess (MIT) | On-device pronunciation scoring, no key | ✅ |
-| [OpenAI](https://openai.com) | LLM coaching logic (rules fallback) | Optional |
+## Development
 
-## Known Limitations
+```bash
+# Lint agent
+cd agent && ruff check echocoach/
 
-- English only (`en-US`).
-- Reading mode only (scripted target sentences).
-- Requires stable internet for LiveKit, Rime, Deepgram calls. Scoring itself is offline.
-- First scoring attempt loads the model (about 15s once per session, warmed up at start).
-- Words missing from the phoneme dictionary get the sentence average, never flagged.
+# Typecheck web
+cd web && npm run typecheck
+
+# Measure latencies
+cd agent && python ../scripts/measure_latency.py
+```
+
+---
 
 ## License
 
-MIT
+Built for DataForge 2026 — Rime Hackathon Challenge.
