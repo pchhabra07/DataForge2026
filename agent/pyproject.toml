@@ -8,10 +8,8 @@ dependencies = [
     "livekit-plugins-rime>=1.0",
     "livekit-plugins-deepgram>=1.0",
     "livekit-plugins-silero>=0.7",
-    "livekit-plugins-openai>=0.10",
     "python-dotenv>=1.0",
     "pronounce-assess>=0.1",
-    "openai>=1.30",
 ]
 
 [project.optional-dependencies]

@@ -63,7 +63,7 @@ Open **http://localhost:3000**, click "Start Coaching Session", and speak!
                         │               │               │
             ┌───────────▼──┐   ┌────────▼────────┐   ┌──▼───────────────┐
             │  ASR (STT)   │   │ Pronunciation    │   │ Coaching Logic   │
-            │  Deepgram    │   │ Assessment       │   │ (LLM + rules):   │
+            │  Deepgram    │   │ Assessment       │   │ (rules engine):  │
             │  Nova-3      │   │ pronounce-assess │   │ decide what to   │
             │  → words +   │   │ (wav2vec2)       │   │ correct & how    │
             │  timestamps  │   │ → per-word score  │   │                  │
@@ -92,7 +92,7 @@ Open **http://localhost:3000**, click "Start Coaching Session", and speak!
 | **STT** | [Deepgram](https://deepgram.com) Nova-3 | Word-level transcription + timestamps + fillers | Free tier |
 | **Pronunciation** | [pronounce-assess](https://github.com/thenomadlad/pronounce-assess) (wav2vec2) | Per-word accuracy scoring | Free, on-device |
 | **TTS** | [Rime](https://rime.ai) Coda | **Primary spoken output** — corrections, word modeling, slow delivery | API key |
-| **LLM** | OpenAI (optional) | Natural coaching phrasing | Optional, rules fallback |
+| **Coaching** | Offline rules engine | Picks worst words, templates feedback | Free, on-device |
 
 ---
 
@@ -143,7 +143,7 @@ Rime is the **primary spoken output**. Every correction is spoken by Rime. Remov
 3. **On-device model size** — wav2vec2 model is ~1.2GB, first run downloads it
 4. **ffmpeg required** — audio resampling depends on ffmpeg being on PATH
 5. **No persistent sessions** — scores reset when you disconnect
-6. **LLM optional** — without `OPENAI_API_KEY`, coaching uses rules-based fallback (still functional, less natural phrasing)
+6. **Offline coaching** — feedback comes from a local rules engine, no LLM key needed
 
 ---
 

@@ -143,7 +143,7 @@ Results are saved to `fixtures/latency_results.json`.
 4. **Rime latency varies** — by region and API load; uncached first call may exceed the 1s target. Subsequent calls benefit from connection reuse.
 5. **No persistent sessions** — scores and metrics reset on disconnect.
 6. **Barge-in depends on VAD** — voice-triggered interruption requires speech energy above threshold. The Skip button is the reliable fallback.
-7. **LLM coaching optional** — without `OPENAI_API_KEY`, coaching uses rules-based fallback (still functional).
+7. **Offline coaching** — feedback comes from a local rules engine, no LLM key involved.
 
 ---
 

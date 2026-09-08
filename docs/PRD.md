@@ -91,11 +91,10 @@ EchoCoach targets **two** of the hackathon's difficult voice problems, with one 
                         │               │               │
             ┌───────────▼──┐   ┌────────▼────────┐   ┌──▼───────────────┐
             │  ASR (STT)   │   │ Pronunciation    │   │ Coaching Logic   │
-            │  Deepgram/   │   │ Assessment       │   │ (LLM + rules):   │
-            │  OpenAI/     │   │ Free engine      │   │ decide what to   │
-            │  Whisper     │   │ (wav2vec2       │   │ correct & how    │
-            │  → words +   │   │ fluency, prosody,│   │                  │
-            │  timestamps  │   │ phoneme scores)  │   │                  │
+            │  Deepgram    │   │ Assessment       │   │ (rules engine):  │
+            │  Nova-3      │   │ Free engine      │   │ decide what to   │
+            │  → words +   │   │ (wav2vec2       │   │ correct & how    │
+            │  timestamps  │   │ fluency, prosody,│   │                  │
             └──────┬───────┘   └────────┬─────────┘   └──────┬───────────┘
                    │                    │                     │
                    └──── "what" ────────┴──── "how" ──────────┘
@@ -124,10 +123,10 @@ EchoCoach targets **two** of the hackathon's difficult voice problems, with one 
 | Layer | Choice | Why |
 |-------|--------|-----|
 | Transport / orchestration | **LiveKit Agents** | Official Rime integration; handles turn-taking, streaming, interruption. Recommended by the PS. |
-| Speech-to-text | **Deepgram** or **OpenAI** (verbatim mode) | Word-level timestamps needed for pace + filler timing. |
+| Speech-to-text | **Deepgram** Nova-3 (verbatim mode) | Word-level timestamps needed for pace + filler timing. |
 | Pronunciation "how" signal | **Free on-device engine (pronounce-assess, wav2vec2 phonemes)** | Returns per-word accuracy plus completeness plus rhythm-based fluency. Zero API cost, no key, runs turn-based after each attempt. Fits the "how you spoke" requirement directly. |
 | Filler detection | ASR verbatim transcript + timestamp gaps (optional: CrisperWhisper for verbatim `[um]`/`[uh]`) | Localizes and classifies fillers reliably. |
-| Coaching logic | **LLM** (any) | Decides which errors to correct and phrases the spoken feedback. |
+| Coaching logic | **Offline rules engine** | Picks worst words, templates short feedback. No key, instant. |
 | **Spoken output** | **Rime — Coda** (quality), **Mist v3** fallback planned (not present) | Rime is the judged primary voice. Coda for natural coaching; Mist v3 only if a low-latency fallback is added later. |
 | Slowed delivery | Rime `timeScaleFactor` / `time_scale_factor` | Word-by-word slow modeling for pronunciation practice. |
 

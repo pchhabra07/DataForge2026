@@ -7,7 +7,7 @@ Detect mispronunciation/filler while the user speaks, then within ~1s speak back
 - **Transport / orchestration:** LiveKit Agents (Python agent server + browser client)
 - **STT:** Deepgram (word timestamps, verbatim/fillers)
 - **Pronunciation "how":** Free on-device engine (pronounce-assess, wav2vec2 phonemes) — per-word accuracy, completeness, rhythm-based fluency, no key, no cost
-- **Coaching brain:** LLM (pick errors, phrase feedback)
+- **Coaching brain:** Offline rules engine (pick worst words, template feedback)
 - **TTS:** Rime `coda` primary, `mistv3` low-latency fallback planned (not present); `timeScaleFactor` (`time_scale_factor = 1.5`) for slow mode
 - **Client:** Web (React/Next), WebRTC via LiveKit
 - **Language:** en-US only
@@ -17,7 +17,7 @@ Detect mispronunciation/filler while the user speaks, then within ~1s speak back
 ## Phase 0 — Foundation & Preflight (Day 1, first half)
 Goal: skeleton + credentials proven before any feature code.
 - Repo scaffold: `/agent` (Python LiveKit agent), `/web` (client), `/docs`, `/fixtures`, `/scripts`
-- `.env.example` with placeholders only (Rime, Deepgram, LiveKit, LLM keys) — no secrets committed ever. Pronunciation scoring needs no key.
+- `.env.example` with placeholders only (Rime, Deepgram, LiveKit keys) — no secrets committed ever. Pronunciation scoring and coaching need no key.
 - LiveKit project + local dev token flow
 - **Rime preflight:** confirm exact model ID / voice / language / endpoint / audio format work against the live catalog. This is a submission gate — do it first.
 - CI-lite: lint + typecheck both packages
@@ -56,7 +56,7 @@ Exit: mispronounced target word visibly flagged with score.
 
 ## Phase 4 — Coaching Logic + Corrective Rime (Day 4)
 Goal: the teaching moment. Close the loop on the core claim.
-- LLM/rules layer: given flagged words, decide what to correct + how to phrase
+- Rules layer: given flagged words, decide what to correct + how to phrase
 - Generate Rime correction: **normal speed**, then **slowed word-by-word** via `timeScaleFactor` (`time_scale_factor = 1.5`)
 - Per-flagged-word "hear correct model" button (normal + slow)
 - Keep correction on the critical path short; run scoring async so latency stays ≤1s
