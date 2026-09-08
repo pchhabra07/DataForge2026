@@ -316,20 +316,37 @@ function SessionView({
   // --- Phase 6: Slow-mode toggle ---
   const [slowMode, setSlowMode] = useState(false);
 
-  // --- Phase 6: Session timer ---
-  const sessionStartRef = useRef<number>(Date.now());
+  const [sessionStart, setSessionStart] = useState<number | null>(() => null);
   const [sessionElapsed, setSessionElapsed] = useState(0);
+  const [nextBusy, setNextBusy] = useState(false);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // --- Phase 6: Metrics panel toggle ---
   const [showMetrics, setShowMetrics] = useState(false);
 
-  // Session timer tick
   useEffect(() => {
+    if (sessionStart == null) return;
     const interval = setInterval(() => {
-      setSessionElapsed(Date.now() - sessionStartRef.current);
+      setSessionElapsed(Date.now() - sessionStart);
     }, 1000);
     return () => clearInterval(interval);
+  }, [sessionStart]);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
+    };
   }, []);
+
+  useEffect(() => {
+    if (connectionState !== ConnectionState.Connected) return;
+    const id = setTimeout(() => {
+      setSessionStart((prev) => (prev == null ? Date.now() : prev));
+      setSessionState("listening");
+    }, 0);
+    return () => clearTimeout(id);
+  }, [connectionState]);
 
   // --- Fallback transcript handler ---
   useEffect(() => {
@@ -384,6 +401,7 @@ function SessionView({
 
       switch (topic) {
         case "sentence":
+          if (participant && !isAgentParticipant(participant)) return;
           setTargetSentence({
             id: toNumberValue(raw.id, 0),
             text: toStringValue(raw.text, ""),
@@ -427,6 +445,7 @@ function SessionView({
           break;
         }
         case "state": {
+          if (participant && !isAgentParticipant(participant)) return;
           const s = raw.state;
           if (
             typeof s !== "string" ||
@@ -443,15 +462,19 @@ function SessionView({
           break;
         }
         case "interruption": {
-          // Phase 5: show skipped toast
+          if (participant && !isAgentParticipant(participant)) return;
           setShowSkippedToast(true);
-          setTimeout(() => setShowSkippedToast(false), 2000);
+          if (toastTimerRef.current) {
+            clearTimeout(toastTimerRef.current);
+          }
+          toastTimerRef.current = setTimeout(() => setShowSkippedToast(false), 2000);
           break;
         }
       }
     };
 
     const handleConnected = () => {
+      setSessionStart((prev) => (prev == null ? Date.now() : prev));
       setSessionState("listening");
     };
 
@@ -493,27 +516,35 @@ function SessionView({
 
   // --- RPC: Request next sentence ---
   const handleNextSentence = useCallback(async () => {
+    if (nextBusy) return;
     try {
       const agent = agentParticipant;
       if (!agent) {
         console.warn("No agent participant found for RPC");
         return;
       }
-      setPronunciation(null);
-      setCoaching(null);
+      setNextBusy(true);
       await room.localParticipant.performRpc({
         destinationIdentity: agent.identity,
         method: "next_sentence",
         payload: "",
       });
+      setPronunciation(null);
+      setCoaching(null);
+      setPipelineMetrics(null);
+      setSessionState("listening");
     } catch (e) {
       console.error("next_sentence RPC failed:", e);
+    } finally {
+      setNextBusy(false);
     }
-  }, [room, agentParticipant]);
+  }, [room, agentParticipant, nextBusy]);
 
   const handleRetry = useCallback(() => {
     setPronunciation(null);
     setCoaching(null);
+    setPipelineMetrics(null);
+    setSessionState("listening");
   }, []);
 
   // --- RPC: Hear a word ---
@@ -576,7 +607,7 @@ function SessionView({
         <div className="skip-toast fade-in">⏭ Skipped</div>
       )}
 
-      <div className={`live-readout ${stateInfo.class}`}>
+      <div className={`live-readout ${connectionState === ConnectionState.Connected ? "on" : ""} ${stateInfo.class}`}>
         <span className="dot" />
         <span>{stateInfo.text}</span>
         {/* Phase 6: Session timer */}
@@ -600,10 +631,16 @@ function SessionView({
       {targetSentence && (
         <>
           <div className="prompt-kicker" style={{ marginTop: 28 }}>
-            Read this aloud · #{targetSentence.id} ·{" "}
+            Read this aloud
+            {targetSentence.id ? ` · #${targetSentence.id}` : ""}
+            {targetSentence.difficulty || targetSentence.category ? " · " : ""}
             <span className="prompt-meta" style={{ margin: 0 }}>
-              <span className="lvl">{targetSentence.difficulty}</span>
-              <span>{targetSentence.category}</span>
+              {targetSentence.difficulty ? (
+                <span className="lvl">{targetSentence.difficulty}</span>
+              ) : null}
+              {targetSentence.category ? (
+                <span>{targetSentence.category}</span>
+              ) : null}
             </span>
           </div>
           <div className="prompt-text">
@@ -680,30 +717,30 @@ function SessionView({
                 {Math.round(pronunciation.completenessScore)}
               </b>
             </div>
-            {pronunciation.prosodyScore > 0 && (
-              <div className="score-cell">
-                Prosody{" "}
-                <b className={scoreClass(pronunciation.prosodyScore)}>
-                  {Math.round(pronunciation.prosodyScore)}
-                </b>
-              </div>
-            )}
+            <div className="score-cell">
+              Prosody{" "}
+              <b className={pronunciation.prosodyScore > 0 ? scoreClass(pronunciation.prosodyScore) : ""}>
+                {pronunciation.prosodyScore > 0
+                  ? Math.round(pronunciation.prosodyScore)
+                  : "-"}
+              </b>
+            </div>
             <div className="score-cell">
               <span className="thresh">flags under 60</span>
             </div>
           </div>
 
-          {pronunciation.assessmentLatencyMs && !pronunciation.isDemo ? (
+          {pronunciation.assessmentLatencyMs != null && !pronunciation.isDemo ? (
             <div className="latency-line" style={{ paddingLeft: 0, marginBottom: 24 }}>
               scored in {Math.round(pronunciation.assessmentLatencyMs)}ms
               {pipelineMetrics
-                ? ` · pipeline ${Math.round(pipelineMetrics.totalPipelineMs)}ms · correction ${Math.round(pipelineMetrics.correctionLatencyMs)}ms`
+                ? ` · pipeline total ${Math.round(pipelineMetrics.totalPipelineMs)}ms · correction ${Math.round(pipelineMetrics.correctionLatencyMs)}ms`
                 : ""}
             </div>
           ) : (
             !pronunciation.isDemo && pipelineMetrics && (
               <div className="latency-line" style={{ paddingLeft: 0, marginBottom: 24 }}>
-                pipeline {Math.round(pipelineMetrics.totalPipelineMs)}ms ·
+                pipeline total {Math.round(pipelineMetrics.totalPipelineMs)}ms ·
                 correction {Math.round(pipelineMetrics.correctionLatencyMs)}ms
               </div>
             )
@@ -743,7 +780,7 @@ function SessionView({
           )}
           {coaching.latencyMs > 0 && !coaching.isDemo && (
             <div className="latency-line">
-              coaching {Math.round(coaching.latencyMs)}ms
+              coach note {Math.round(coaching.latencyMs)}ms
             </div>
           )}
         </div>
@@ -823,6 +860,12 @@ function SessionView({
         </div>
       )}
 
+      {slowMode && (
+        <div className="latency-line" style={{ marginBottom: 12 }}>
+          Slow mode on — Play buttons play slowly
+        </div>
+      )}
+
       <div className="deck">
         <div className="deck-inner">
           <div
@@ -858,7 +901,7 @@ function SessionView({
             <button
               className="deck-btn"
               onClick={handleNextSentence}
-              disabled={agentMissing}
+              disabled={agentMissing || nextBusy}
             >
               Next
             </button>

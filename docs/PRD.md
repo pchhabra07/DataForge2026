@@ -104,7 +104,7 @@ EchoCoach targets **two** of the hackathon's difficult voice problems, with one 
                     ┌──────────────────────────────────────────┐
                     │   RIME TTS (primary spoken output)        │
                     │   - normal-speed correction               │
-                    │   - slowed word-by-word (speed_alpha)     │
+                     │   - slowed word-by-word (timeScaleFactor)     │
                     └──────────────────┬───────────────────────┘
                                        │  streamed audio
                                        ▼
@@ -128,17 +128,17 @@ EchoCoach targets **two** of the hackathon's difficult voice problems, with one 
 | Pronunciation "how" signal | **Free on-device engine (pronounce-assess, wav2vec2 phonemes)** | Returns per-word accuracy plus completeness plus rhythm-based fluency. Zero API cost, no key, runs turn-based after each attempt. Fits the "how you spoke" requirement directly. |
 | Filler detection | ASR verbatim transcript + timestamp gaps (optional: CrisperWhisper for verbatim `[um]`/`[uh]`) | Localizes and classifies fillers reliably. |
 | Coaching logic | **LLM** (any) | Decides which errors to correct and phrases the spoken feedback. |
-| **Spoken output** | **Rime — Coda** (quality) with **Mist v3** fallback (lowest latency) | Rime is the judged primary voice. Coda for natural coaching; Mist v3 when speed is critical. |
-| Slowed delivery | Rime `speed_alpha` / `inline_speed_alpha` | Word-by-word slow modeling for pronunciation practice. |
+| **Spoken output** | **Rime — Coda** (quality), **Mist v3** fallback planned (not present) | Rime is the judged primary voice. Coda for natural coaching; Mist v3 only if a low-latency fallback is added later. |
+| Slowed delivery | Rime `timeScaleFactor` / `time_scale_factor` | Word-by-word slow modeling for pronunciation practice. |
 
 ### Rime configuration (to record in README)
-- **Model:** `rime/coda` (primary), `rime/mistv3` (low-latency fallback)
+- **Model:** `rime/coda` (primary), `rime/mistv3` low-latency fallback planned (not present)
 - **Voice:** chosen from Rime's live catalog at submission time
 - **Language:** `en`
 - **Endpoint:** nearest regional endpoint
 - **Audio format:** streamed PCM/L16 for web; 8kHz if telephony demo added
 - **Transport:** LiveKit (WebRTC)
-- **Speed control:** `speed_alpha > 1.0` for slowed word-by-word coaching
+- **Speed control:** `timeScaleFactor = 1.5` for slowed word-by-word coaching
 
 ---
 

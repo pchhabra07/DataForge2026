@@ -97,6 +97,7 @@ async def echocoach_session(ctx: agents.JobContext):
     # send_to_client() in the coaching path, check that the current gen
     # hasn't been superseded. If it has, bail silently.
     correction_gen = 0
+    speaking_active = False
     session_metrics = SessionMetrics()
 
     # --- Build agent session with Rime TTS ---
@@ -132,10 +133,17 @@ async def echocoach_session(ctx: agents.JobContext):
 
     async def say_slow(text: str):
         """Speak text at slow coaching speed via the HTTP slow voice."""
+        frames = await fetch_slow_frames(text)
+        await _play_slow_frames(text, frames)
+
+    async def fetch_slow_frames(text: str) -> list[rtc.AudioFrame]:
+        """Synthesize slow audio without playing it, so callers can fence first."""
         frames: list[rtc.AudioFrame] = []
         async for chunk in slow_tts.synthesize(text):
             frames.append(chunk.frame)
+        return frames
 
+    async def _play_slow_frames(text: str, frames: list[rtc.AudioFrame]):
         async def _play():
             for f in frames:
                 yield f
@@ -173,10 +181,15 @@ async def echocoach_session(ctx: agents.JobContext):
 
         Returns True if the speech completed, False if fenced out.
         """
+        nonlocal speaking_active
         if gen != correction_gen:
             logger.debug("Fenced out say() for gen %d (current=%d)", gen, correction_gen)
             return False
-        await session.say(text)
+        speaking_active = True
+        try:
+            await session.say(text)
+        finally:
+            speaking_active = False
         return gen == correction_gen
 
     async def say_slow_fenced(text: str, gen: int) -> bool:
@@ -184,41 +197,53 @@ async def echocoach_session(ctx: agents.JobContext):
         if gen != correction_gen:
             logger.debug("Fenced out slow say() for gen %d (current=%d)", gen, correction_gen)
             return False
-        await say_slow(text)
+        frames = await fetch_slow_frames(text)
+        if gen != correction_gen:
+            logger.debug("Fenced out slow playback for gen %d (current=%d)", gen, correction_gen)
+            return False
+        nonlocal speaking_active
+        speaking_active = True
+        try:
+            await _play_slow_frames(text, frames)
+        finally:
+            speaking_active = False
         return gen == correction_gen
 
     # --- Phase 5: Interrupt helper ---
     async def interrupt_coaching(source: str = "unknown"):
         """Stop current coaching output and fence stale corrections."""
         nonlocal correction_gen
-        t_interrupt = time.perf_counter()
+        was_speaking = speaking_active
         correction_gen += 1
         logger.info(
-            "Interrupting coaching (source=%s, new_gen=%d)",
+            "Interrupting coaching (source=%s, new_gen=%d, was_speaking=%s)",
             source,
             correction_gen,
+            was_speaking,
         )
 
-        # Try to interrupt the session's current speech
-        try:
-            session.interrupt()
-        except Exception:
-            logger.debug("session.interrupt() not available or failed")
+        if was_speaking:
+            t_interrupt = time.perf_counter()
+            try:
+                maybe = session.interrupt()
+                if asyncio.isfuture(maybe) or asyncio.iscoroutine(maybe):
+                    await maybe
+            except Exception:
+                logger.debug("session.interrupt() not available or failed")
 
-        # Measure and record interruption latency
-        interrupt_ms = (time.perf_counter() - t_interrupt) * 1000
-        session_metrics.record_interruption(interrupt_ms)
+            interrupt_ms = (time.perf_counter() - t_interrupt) * 1000
+            session_metrics.record_interruption(interrupt_ms)
+            await send_to_client(
+                "interruption",
+                {
+                    "interruptionMs": round(interrupt_ms, 1),
+                    "source": source,
+                    "gen": correction_gen,
+                },
+            )
+            logger.info("Interruption complete in %.1fms (source=%s)", interrupt_ms, source)
 
         await send_to_client("state", {"state": "listening"})
-        await send_to_client(
-            "interruption",
-            {
-                "interruptionMs": round(interrupt_ms, 1),
-                "source": source,
-                "gen": correction_gen,
-            },
-        )
-        logger.info("Interruption complete in %.1fms (source=%s)", interrupt_ms, source)
 
     # --- Send initial target sentence ---
     await send_to_client(
@@ -231,15 +256,16 @@ async def echocoach_session(ctx: agents.JobContext):
         },
     )
 
-    # --- Speak greeting with target sentence ---
+    # --- Speak greeting with target sentence (fenced, user can barge in) ---
     greeting = (
         f"Welcome to EchoCoach! Let's practice your pronunciation. "
         f"Please read this sentence aloud: {current_sentence.text}"
     )
     t_speak = time.perf_counter()
-    await session.say(greeting)
+    correction_gen += 1
+    greet_ok = await say_fenced(greeting, correction_gen)
     t_done = time.perf_counter()
-    logger.info(f"Rime greeting latency: {(t_done - t_speak) * 1000:.0f}ms")
+    logger.info(f"Rime greeting latency: {(t_done - t_speak) * 1000:.0f}ms (completed={greet_ok})")
 
     # --- Phase 6: Send pre-scored demo state ("preset already running") ---
     demo_result = _mock_pronunciation_assessment(current_sentence.text)
@@ -308,6 +334,7 @@ async def echocoach_session(ctx: agents.JobContext):
             if not word:
                 return json.dumps({"error": "No word specified"})
 
+            await interrupt_coaching("hear_word")
             if speed == "slow":
                 # Use slow TTS for word-by-word modeling
                 await say_slow(word)
@@ -327,21 +354,22 @@ async def echocoach_session(ctx: agents.JobContext):
 
     # --- Process user audio for pronunciation assessment ---
     @_serialize_utterances
-    async def process_utterance(audio_data: bytes):
+    async def process_utterance(audio_data: bytes, ref_text: str):
         """Run pronunciation assessment + coaching on captured audio."""
         try:
-            await _process_utterance_inner(audio_data)
+            await _process_utterance_inner(audio_data, ref_text)
         except Exception:
             logger.exception("Utterance processing failed, returning to listening")
             await send_to_client("state", {"state": "listening"})
 
-    async def _process_utterance_inner(audio_data: bytes):
-        nonlocal current_sentence, correction_gen
+    async def _process_utterance_inner(audio_data: bytes, ref_text: str):
+        nonlocal correction_gen
 
         if len(audio_data) < 4800:  # Too short
             logger.debug("Utterance too short (%d bytes), skipping", len(audio_data))
             return
 
+        snap_gen = correction_gen
         t_assess_start = time.perf_counter()
 
         # Send "assessing" state to client
@@ -350,13 +378,17 @@ async def echocoach_session(ctx: agents.JobContext):
         # Run pronunciation assessment in a worker thread
         result = await assess_pronunciation(
             audio_bytes=bytes(audio_data),
-            reference_text=current_sentence.text,
+            reference_text=ref_text,
             sample_rate=LIVEKIT_SAMPLE_RATE,
         )
 
         if result is None:
             logger.warning("Pronunciation assessment returned no result")
             await send_to_client("state", {"state": "listening"})
+            return
+
+        if snap_gen != correction_gen:
+            logger.info("Utterance superseded during assessment, dropping stale result")
             return
 
         t_assess_end = time.perf_counter()
@@ -386,7 +418,7 @@ async def echocoach_session(ctx: agents.JobContext):
             flagged_dicts = [w.to_dict() for w in result.flagged_words]
             correction = await generate_correction(
                 flagged_words=flagged_dicts,
-                reference_text=current_sentence.text,
+                reference_text=ref_text,
             )
 
             # Check fence before sending coaching data
@@ -411,10 +443,16 @@ async def echocoach_session(ctx: agents.JobContext):
                     logger.info("Coaching speech interrupted at word '%s'", word)
                     return
                 await asyncio.sleep(0.3)  # Brief pause
+                if my_gen != correction_gen:
+                    logger.info("Coaching fenced during pause at word '%s'", word)
+                    return
                 if not await say_slow_fenced(f"Now slowly: {word}", my_gen):
                     logger.info("Coaching slow speech interrupted at word '%s'", word)
                     return
                 await asyncio.sleep(0.3)
+                if my_gen != correction_gen:
+                    logger.info("Coaching fenced during pause at word '%s'", word)
+                    return
 
             t_correction_end = time.perf_counter()
             correction_ms = (t_correction_end - t_correction_start) * 1000
@@ -493,20 +531,16 @@ async def echocoach_session(ctx: agents.JobContext):
                                     speech_active = True
                                     speech_frames = []
                                     # Phase 5: interrupt coaching when user starts speaking
-                                    if correction_gen > 0:
-                                        asyncio.create_task(
-                                            interrupt_coaching("user_speech")
-                                        )
+                                    asyncio.create_task(interrupt_coaching("user_speech"))
                                     await send_to_client("state", {"state": "listening_active"})
                                     logger.debug("Speech started")
                                 silence_count = 0
                                 speech_frames.append(frame_bytes)
                             elif speech_active:
                                 silence_count += 1
-                                speech_frames.append(frame_bytes)  # Keep trailing audio
+                                speech_frames.append(frame_bytes)
 
                                 if silence_count >= SILENCE_THRESHOLD:
-                                    # Speech ended — process the utterance
                                     speech_active = False
                                     logger.info(
                                         "Speech ended, %d frames captured",
@@ -514,8 +548,11 @@ async def echocoach_session(ctx: agents.JobContext):
                                     )
                                     all_audio = b"".join(speech_frames)
                                     speech_frames = []
+                                    # Snapshot the sentence so a mid-pipeline
+                                    # next_sentence cannot misattribute audio
+                                    ref_snapshot = current_sentence.text
                                     # Process async
-                                    asyncio.create_task(process_utterance(all_audio))
+                                    asyncio.create_task(process_utterance(all_audio, ref_snapshot))
 
                         return  # Stream ended
 

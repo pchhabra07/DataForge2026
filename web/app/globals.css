@@ -864,10 +864,11 @@ body::before {
   .rail { padding: 12px 16px; }
   .hero { padding: 40px 20px; }
   .console { padding: 24px 20px 150px; }
-  .deck-inner { padding: 12px 16px; gap: 12px; }
+  .deck-inner { padding: 12px 16px; gap: 12px; justify-content: center; }
+  .deck-actions { justify-content: center; flex-wrap: wrap; }
   .deck-status { display: none; }
   .session-timer { display: none; }
-  .inline-btns { display: none; }
+  .inline-btns { display: inline-flex; flex-wrap: wrap; }
   .metrics-panel { padding: 8px 10px; }
   .metrics-panel td:first-child { width: auto; }
 }

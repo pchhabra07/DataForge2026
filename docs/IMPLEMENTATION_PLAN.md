@@ -8,7 +8,7 @@ Detect mispronunciation/filler while the user speaks, then within ~1s speak back
 - **STT:** Deepgram (word timestamps, verbatim/fillers)
 - **Pronunciation "how":** Free on-device engine (pronounce-assess, wav2vec2 phonemes) — per-word accuracy, completeness, rhythm-based fluency, no key, no cost
 - **Coaching brain:** LLM (pick errors, phrase feedback)
-- **TTS:** Rime `coda` primary, `mistv3` low-latency fallback; `speed_alpha` for slow mode
+- **TTS:** Rime `coda` primary, `mistv3` low-latency fallback planned (not present); `timeScaleFactor` (`time_scale_factor = 1.5`) for slow mode
 - **Client:** Web (React/Next), WebRTC via LiveKit
 - **Language:** en-US only
 
@@ -57,7 +57,7 @@ Exit: mispronounced target word visibly flagged with score.
 ## Phase 4 — Coaching Logic + Corrective Rime (Day 4)
 Goal: the teaching moment. Close the loop on the core claim.
 - LLM/rules layer: given flagged words, decide what to correct + how to phrase
-- Generate Rime correction: **normal speed**, then **slowed word-by-word** via `speed_alpha` / `inline_speed_alpha`
+- Generate Rime correction: **normal speed**, then **slowed word-by-word** via `timeScaleFactor` (`time_scale_factor = 1.5`)
 - Per-flagged-word "hear correct model" button (normal + slow)
 - Keep correction on the critical path short; run scoring async so latency stays ≤1s
 - Re-attempt loop: re-speak word → score updates in real time

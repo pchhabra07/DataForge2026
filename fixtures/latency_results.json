@@ -1,0 +1,59 @@
+{
+  "timestamp": "2026-09-08T18:06:08",
+  "rime_tts": [
+    {
+      "sentence_id": 7,
+      "variant": "period",
+      "speed": "normal",
+      "error": "Connection error. (caused by RuntimeError: Attempted to use an http session outside of a job context. This is probably because you are trying to use a plugin without using the agent worker api. If you're running plugins outside the agent worker (e.g. tests or scripts), wrap your code with `async with livekit.agents.utils.http_context.open(): ...`. Alternatively, create your own aiohttp.ClientSession, pass it into the plugin constructor as a kwarg, and manage its lifecycle.)"
+    },
+    {
+      "sentence_id": 7,
+      "variant": "period",
+      "speed": "slow",
+      "error": "Connection error. (caused by RuntimeError: Attempted to use an http session outside of a job context. This is probably because you are trying to use a plugin without using the agent worker api. If you're running plugins outside the agent worker (e.g. tests or scripts), wrap your code with `async with livekit.agents.utils.http_context.open(): ...`. Alternatively, create your own aiohttp.ClientSession, pass it into the plugin constructor as a kwarg, and manage its lifecycle.)"
+    },
+    {
+      "sentence_id": "7b",
+      "variant": "exclamation",
+      "speed": "normal",
+      "error": "Connection error. (caused by RuntimeError: Attempted to use an http session outside of a job context. This is probably because you are trying to use a plugin without using the agent worker api. If you're running plugins outside the agent worker (e.g. tests or scripts), wrap your code with `async with livekit.agents.utils.http_context.open(): ...`. Alternatively, create your own aiohttp.ClientSession, pass it into the plugin constructor as a kwarg, and manage its lifecycle.)"
+    },
+    {
+      "sentence_id": "7b",
+      "variant": "exclamation",
+      "speed": "slow",
+      "error": "Connection error. (caused by RuntimeError: Attempted to use an http session outside of a job context. This is probably because you are trying to use a plugin without using the agent worker api. If you're running plugins outside the agent worker (e.g. tests or scripts), wrap your code with `async with livekit.agents.utils.http_context.open(): ...`. Alternatively, create your own aiohttp.ClientSession, pass it into the plugin constructor as a kwarg, and manage its lifecycle.)"
+    },
+    {
+      "sentence_id": 1,
+      "variant": "easy",
+      "speed": "normal",
+      "error": "Connection error. (caused by RuntimeError: Attempted to use an http session outside of a job context. This is probably because you are trying to use a plugin without using the agent worker api. If you're running plugins outside the agent worker (e.g. tests or scripts), wrap your code with `async with livekit.agents.utils.http_context.open(): ...`. Alternatively, create your own aiohttp.ClientSession, pass it into the plugin constructor as a kwarg, and manage its lifecycle.)"
+    },
+    {
+      "sentence_id": 1,
+      "variant": "easy",
+      "speed": "slow",
+      "error": "Connection error. (caused by RuntimeError: Attempted to use an http session outside of a job context. This is probably because you are trying to use a plugin without using the agent worker api. If you're running plugins outside the agent worker (e.g. tests or scripts), wrap your code with `async with livekit.agents.utils.http_context.open(): ...`. Alternatively, create your own aiohttp.ClientSession, pass it into the plugin constructor as a kwarg, and manage its lifecycle.)"
+    }
+  ],
+  "assessment": [
+    {
+      "sentence_id": 7,
+      "variant": "period",
+      "assessment_ms": 1024.9,
+      "has_result": true,
+      "accuracy": 0.0,
+      "flagged_count": 8
+    },
+    {
+      "sentence_id": "7b",
+      "variant": "exclamation",
+      "assessment_ms": 729.9,
+      "has_result": true,
+      "accuracy": 0.0,
+      "flagged_count": 8
+    }
+  ]
+}

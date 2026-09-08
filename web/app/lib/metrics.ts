@@ -2,7 +2,7 @@ export const FILLER_WORDS: readonly string[] = ["um", "uh", "like", "er", "ah", 
 
 export function countWords(text: string): number {
   const tokens = text.trim().split(/\s+/).filter((t) => t.length > 0);
-  return tokens.length === 1 && tokens[0] === "" ? 0 : tokens.length;
+  return tokens.length;
 }
 
 export function normalizeFillerWord(token: string): string | null {
