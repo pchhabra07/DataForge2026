@@ -32,6 +32,20 @@ DEFAULT_FLAG_THRESHOLD = 60
 _MODEL_LOCK = threading.RLock()
 _SCORER = None
 
+_PROGRESS = {"phase": "idle", "file": "", "downloaded": 0, "total": 0}
+_PROGRESS_LOCK = threading.Lock()
+
+
+def get_download_progress() -> dict:
+    """Thread-safe snapshot of model download progress for the client."""
+    with _PROGRESS_LOCK:
+        return dict(_PROGRESS)
+
+
+def _set_progress(**fields) -> None:
+    with _PROGRESS_LOCK:
+        _PROGRESS.update(fields)
+
 
 @dataclass
 class WordScore:
@@ -172,6 +186,7 @@ async def warmup_free_assessor(on_status=None) -> None:
     if on_status is not None:
         await on_status("loading")
     try:
+        await loop.run_in_executor(None, _ensure_model_cached)
         await loop.run_in_executor(None, _get_scorer)
     except Exception:
         logger.exception("Pronunciation model warmup failed, first attempt will load it")
@@ -180,6 +195,37 @@ async def warmup_free_assessor(on_status=None) -> None:
         return
     if on_status is not None:
         await on_status("ready")
+
+
+def _ensure_model_cached() -> None:
+    """Download model files with live progress, no-op when already cached."""
+    from huggingface_hub import snapshot_download
+    from tqdm.asyncio import tqdm_asyncio
+
+    class _ProgressTqdm(tqdm_asyncio):
+        def __init__(self, *args, **kwargs):
+            kwargs["disable"] = True
+            super().__init__(*args, **kwargs)
+            _set_progress(
+                file=str(self.desc or ""),
+                downloaded=0,
+                total=self.total or 0,
+            )
+
+        def update(self, n=1):
+            out = super().update(n)
+            _set_progress(downloaded=self.n or 0, total=self.total or 0)
+            return out
+
+    _set_progress(phase="downloading", file="", downloaded=0, total=0)
+    try:
+        snapshot_download(
+            repo_id="vitouphy/wav2vec2-xls-r-300m-timit-phoneme",
+            tqdm_class=_ProgressTqdm,
+        )
+    finally:
+        with _PROGRESS_LOCK:
+            _PROGRESS["phase"] = "cached" if _PROGRESS.get("total") else "loading"
 
 
 def _get_scorer():

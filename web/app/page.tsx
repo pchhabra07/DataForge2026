@@ -20,6 +20,7 @@ import {
   toPipelineSnapshot,
 } from "./lib/metrics";
 import type { TranscriptLine, PipelineSnapshot } from "./lib/metrics";
+import { FIRST_SENTENCE } from "./lib/sentences";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -138,6 +139,7 @@ export default function Home() {
     useState<TokenResponse | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showExample, setShowExample] = useState(true);
 
   const handleConnect = useCallback(async () => {
     setIsConnecting(true);
@@ -180,6 +182,7 @@ export default function Home() {
 
       <main style={{ display: "contents" }}>
         {!connectionDetails ? (
+          <>
           <div className="hero fade-in">
             <div className="hero-kicker">Real-time speaking coach</div>
             <h2 className="hero-title">
@@ -203,11 +206,57 @@ export default function Home() {
                 </>
               ) : (
                 <>
-                  🎤 Start Coaching Session
+                  Start Coaching Session <span className="arrow">→</span>
                 </>
               )}
             </button>
           </div>
+          {showExample && (
+            <div
+              className="modal-overlay fade-in"
+              onClick={() => setShowExample(false)}
+            >
+              <div className="modal" onClick={(e) => e.stopPropagation()}>
+                <button
+                  className="modal-close"
+                  onClick={() => setShowExample(false)}
+                  aria-label="Dismiss"
+                >
+                  ×
+                </button>
+                <div className="modal-kicker">
+                  Your first sentence · {FIRST_SENTENCE.difficulty}
+                </div>
+                <p className="modal-sentence">
+                  &ldquo;{FIRST_SENTENCE.text}&rdquo;
+                </p>
+                <p className="modal-hint">
+                  Read this aloud after you start. The coach scores every
+                  word and speaks the fix back.
+                </p>
+                <button
+                  className="start-btn"
+                  onClick={() => {
+                    setShowExample(false);
+                    handleConnect();
+                  }}
+                  disabled={isConnecting}
+                >
+                  {isConnecting ? (
+                    <>
+                      <span className="spinner" />
+                      Connecting
+                    </>
+                  ) : (
+                    <>
+                      Start Coaching Session <span className="arrow">→</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+          </>
         ) : (
           <LiveKitRoom
             serverUrl={connectionDetails.url}
@@ -318,6 +367,12 @@ function SessionView({
   const [slowMode, setSlowMode] = useState(false);
 
   const [modelStatus, setModelStatus] = useState<string | null>(null);
+  const [modelProgress, setModelProgress] = useState<{
+    percent: number;
+    downloadedMb: number;
+    totalMb: number;
+    file: string;
+  } | null>(null);
   const [micMuted, setMicMuted] = useState(false);
 
   const [sessionStart, setSessionStart] = useState<number | null>(() => null);
@@ -470,6 +525,21 @@ function SessionView({
           const s = toStringValue(raw.status, "");
           if (s === "loading" || s === "ready" || s === "error") {
             setModelStatus(s);
+          }
+          if (s === "downloading") {
+            const total = toNumberValue(raw.totalBytes, 0);
+            const done = toNumberValue(raw.downloadedBytes, 0);
+            const pct = toNumberValue(raw.percent, 0);
+            setModelStatus("downloading");
+            setModelProgress({
+              percent: pct,
+              downloadedMb: Math.round((done / 1048576) * 10) / 10,
+              totalMb: Math.round((total / 1048576) * 10) / 10,
+              file: toStringValue(raw.file, ""),
+            });
+          }
+          if (s === "ready" || s === "error") {
+            setModelProgress(null);
           }
           break;
         }
@@ -646,9 +716,25 @@ function SessionView({
           />
         )}
       </div>
-      {modelStatus === "loading" && (
+      {modelStatus === "loading" && !modelProgress && (
         <div className="agent-line">
           Preparing scoring model — first attempt takes a moment…
+        </div>
+      )}
+      {modelStatus === "downloading" && modelProgress && (
+        <div className="model-dl">
+          <div className="model-dl-row">
+            <span>
+              Downloading scoring model · {modelProgress.percent}% ·{" "}
+              {modelProgress.downloadedMb}/{modelProgress.totalMb} MB
+            </span>
+          </div>
+          <div className="progress-track">
+            <div
+              className="progress-fill"
+              style={{ width: `${Math.min(100, modelProgress.percent)}%` }}
+            />
+          </div>
         </div>
       )}
       {modelStatus === "error" && (

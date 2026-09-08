@@ -28,7 +28,6 @@ from livekit.plugins import deepgram, rime, silero
 from echocoach.coaching import generate_correction
 from echocoach.measure import MetricsSample, SessionMetrics
 from echocoach.pronunciation import (
-    _mock_pronunciation_assessment,
     assess_pronunciation,
     warmup_free_assessor,
 )
@@ -160,12 +159,6 @@ async def echocoach_session(ctx: agents.JobContext):
     t1 = time.perf_counter()
     logger.info(f"Session started in {(t1 - t0) * 1000:.0f}ms")
 
-    asyncio.create_task(
-        warmup_free_assessor(
-            lambda status, **info: send_to_client("model_status", {"status": status, **info})
-        )
-    )
-
     # --- Helper: send JSON data to client ---
     async def send_to_client(topic: str, data: dict):
         """Send structured data to the client via LiveKit data channel."""
@@ -178,6 +171,41 @@ async def echocoach_session(ctx: agents.JobContext):
             logger.debug("Sent %s: %s", topic, payload[:120])
         except Exception:
             logger.exception("Failed to send data to client (topic=%s)", topic)
+
+    async def _report_model_progress() -> None:
+        """Poll download bytes and stream live progress to the client."""
+        from echocoach.pronunciation import get_download_progress
+
+        last_sent = -1
+        for _ in range(1200):
+            await asyncio.sleep(0.5)
+            snap = get_download_progress()
+            if snap["phase"] != "downloading" or not snap["total"]:
+                continue
+            total = snap["total"] or 0
+            done = snap["downloaded"] or 0
+            percent = round(100.0 * done / total, 1) if total > 0 else 0.0
+            if percent - last_sent >= 1.0 or (percent >= 100.0 and last_sent < 100):
+                last_sent = percent
+                await send_to_client(
+                    "model_status",
+                    {
+                        "status": "downloading",
+                        "file": snap["file"],
+                        "downloadedBytes": done,
+                        "totalBytes": total,
+                        "percent": percent,
+                    },
+                )
+            if percent >= 100.0:
+                return
+
+    asyncio.create_task(
+        warmup_free_assessor(
+            lambda status, **info: send_to_client("model_status", {"status": status, **info})
+        )
+    )
+    asyncio.create_task(_report_model_progress())
 
     # --- Phase 5: Generation-fenced say helper ---
     async def say_fenced(text: str, gen: int) -> bool:
@@ -271,32 +299,6 @@ async def echocoach_session(ctx: agents.JobContext):
     t_done = time.perf_counter()
     logger.info(f"Rime greeting latency: {(t_done - t_speak) * 1000:.0f}ms (completed={greet_ok})")
 
-    # --- Phase 6: Send pre-scored demo state ("preset already running") ---
-    demo_result = _mock_pronunciation_assessment(current_sentence.text)
-    demo_data = demo_result.to_dict()
-    demo_data["isDemo"] = True
-    demo_data["assessmentLatencyMs"] = 0
-    await send_to_client("pronunciation", demo_data)
-
-    # Send demo coaching for the flagged words
-    if demo_result.has_issues:
-        flagged_words_text = [w.word for w in demo_result.flagged_words]
-        demo_coaching_text = (
-            f"I noticed the word '{flagged_words_text[0]}' could use some "
-            f"practice. Try reading the sentence aloud and I'll score your "
-            f"pronunciation!"
-        )
-        await send_to_client(
-            "coaching",
-            {
-                "coachingText": demo_coaching_text,
-                "wordsToModel": flagged_words_text[:3],
-                "latencyMs": 0,
-                "source": "demo",
-                "isDemo": True,
-            },
-        )
-
     # --- Audio capture buffer ---
     # One utterance is assessed and coached at a time so slow speech
     # never overlaps itself when the user speaks rapidly.
@@ -312,8 +314,7 @@ async def echocoach_session(ctx: agents.JobContext):
     # --- Handle RPC calls from client ---
     @ctx.room.local_participant.register_rpc_method("next_sentence")
     async def handle_next_sentence(data: rtc.RpcInvocationData):
-        nonlocal current_sentence
-        # Interrupt any ongoing coaching
+        nonlocal current_sentence, speaking_active
         await interrupt_coaching("next_sentence")
         current_sentence = get_next_sentence(current_sentence.id)
         await send_to_client(
@@ -325,12 +326,17 @@ async def echocoach_session(ctx: agents.JobContext):
                 "category": current_sentence.category,
             },
         )
-        await session.say(f"Great, let's try this one: {current_sentence.text}")
+        speaking_active = True
+        try:
+            await session.say(f"Great, let's try this one: {current_sentence.text}")
+        finally:
+            speaking_active = False
         return json.dumps({"id": current_sentence.id, "text": current_sentence.text})
 
     @ctx.room.local_participant.register_rpc_method("hear_word")
     async def handle_hear_word(data: rtc.RpcInvocationData):
         """Client requests to hear a specific word spoken by Rime."""
+        nonlocal speaking_active
         try:
             payload = json.loads(data.payload)
             word = payload.get("word", "")
@@ -339,11 +345,15 @@ async def echocoach_session(ctx: agents.JobContext):
                 return json.dumps({"error": "No word specified"})
 
             await interrupt_coaching("hear_word")
-            if speed == "slow":
-                # Use slow TTS for word-by-word modeling
-                await say_slow(word)
-            else:
-                await session.say(word)
+            speaking_active = True
+            try:
+                if speed == "slow":
+                    # Use slow TTS for word-by-word modeling
+                    await say_slow(word)
+                else:
+                    await session.say(word)
+            finally:
+                speaking_active = False
             return json.dumps({"ok": True, "word": word, "speed": speed})
         except Exception as e:
             logger.exception("hear_word RPC error")
@@ -393,6 +403,14 @@ async def echocoach_session(ctx: agents.JobContext):
 
         if snap_gen != correction_gen:
             logger.info("Utterance superseded during assessment, dropping stale result")
+            return
+
+        if (result.completeness_score or 0) < 20:
+            logger.info(
+                "Discarding assessment with no usable speech (completeness=%.1f)",
+                result.completeness_score or 0,
+            )
+            await send_to_client("state", {"state": "listening"})
             return
 
         t_assess_end = time.perf_counter()
@@ -490,7 +508,12 @@ async def echocoach_session(ctx: agents.JobContext):
                 correction_source="none",
             )
             session_metrics.record(sample)
-            await session.say("Excellent pronunciation! You nailed that sentence. Well done!")
+            nonlocal speaking_active
+            speaking_active = True
+            try:
+                await session.say("Excellent pronunciation! You nailed that sentence. Well done!")
+            finally:
+                speaking_active = False
             await send_to_client("metrics", session_metrics.latest_dict())
 
         await send_to_client("state", {"state": "listening"})
@@ -513,7 +536,12 @@ async def echocoach_session(ctx: agents.JobContext):
                         # process on silence detection
                         speech_frames: list[bytes] = []
                         silence_count = 0
+                        voiced_frames = 0
                         speech_active = False
+                        turn_tainted = False
+                        last_speaking_seen = 0.0
+                        ECHO_TAIL_S = 1.5
+                        MIN_VOICED_FRAMES = 25
                         SILENCE_THRESHOLD = 15  # ~750ms of silence at 20ms frames
 
                         async for event in audio_stream:
@@ -530,15 +558,30 @@ async def echocoach_session(ctx: agents.JobContext):
                             # Simple energy-based speech detection
                             energy = _compute_energy(frame_bytes)
 
+                            if speaking_active:
+                                last_speaking_seen = time.perf_counter()
+
                             if energy > 200:  # Speech threshold
                                 if not speech_active:
                                     speech_active = True
                                     speech_frames = []
+                                    voiced_frames = 0
+                                    # Turns starting while the coach speaks are
+                                    # mostly speaker echo, never score them.
+                                    # The tail covers echo lingering right after
+                                    # an interrupt stops coach speech.
+                                    turn_tainted = speaking_active or (
+                                        time.perf_counter() - last_speaking_seen < ECHO_TAIL_S
+                                    )
+                                    turn_tainted = speaking_active
                                     # Phase 5: interrupt coaching when user starts speaking
                                     asyncio.create_task(interrupt_coaching("user_speech"))
                                     await send_to_client("state", {"state": "listening_active"})
                                     logger.debug("Speech started")
+                                if speaking_active:
+                                    turn_tainted = True
                                 silence_count = 0
+                                voiced_frames += 1
                                 speech_frames.append(frame_bytes)
                             elif speech_active:
                                 silence_count += 1
@@ -550,6 +593,16 @@ async def echocoach_session(ctx: agents.JobContext):
                                         "Speech ended, %d frames captured",
                                         len(speech_frames),
                                     )
+                                    if turn_tainted:
+                                        logger.info(
+                                            "Discarding turn overlapping coach speech (echo)"
+                                        )
+                                        speech_frames = []
+                                        continue
+                                    if voiced_frames < MIN_VOICED_FRAMES:
+                                        logger.info("Discarding turn with too little voiced audio")
+                                        speech_frames = []
+                                        continue
                                     all_audio = b"".join(speech_frames)
                                     speech_frames = []
                                     # Snapshot the sentence so a mid-pipeline
