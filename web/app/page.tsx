@@ -58,6 +58,11 @@ interface CoachingData {
   source: string;
 }
 
+interface PipelineMetrics {
+  totalPipelineMs: number;
+  correctionLatencyMs: number;
+}
+
 type SessionState =
   | "connecting"
   | "listening"
@@ -65,6 +70,62 @@ type SessionState =
   | "assessing"
   | "coaching"
   | "idle";
+
+const KNOWN_STATES: readonly SessionState[] = [
+  "connecting",
+  "listening",
+  "listening_active",
+  "assessing",
+  "coaching",
+  "idle",
+];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function toNumberValue(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function toStringValue(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function toStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function toWordList(value: unknown): WordScoreData[] {
+  if (!Array.isArray(value)) return [];
+  const out: WordScoreData[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    out.push({
+      word: toStringValue(item.word, ""),
+      accuracyScore: toNumberValue(item.accuracyScore, 0),
+      errorType: toStringValue(item.errorType, "None"),
+      isFlagged: item.isFlagged === true,
+    });
+  }
+  return out;
+}
+
+function isAgentParticipant(p: Participant): boolean {
+  if (p.identity === "echocoach") return true;
+  if (p.identity.toLowerCase().includes("agent")) return true;
+  return p.permissions?.canPublish === true;
+}
+
+function findAgent(
+  participants: Iterable<Participant>
+): Participant | undefined {
+  const list = Array.from(participants);
+  const exact = list.find((p) => p.identity === "echocoach");
+  if (exact) return exact;
+  return list.find((p) => p.permissions?.canPublish === true);
+}
 
 // ---------------------------------------------------------------------------
 // Main Page
@@ -205,7 +266,7 @@ function scoreClass(score: number): string {
 }
 
 function wordScoreClass(word: WordScoreData): string {
-  if (word.isFlagged || word.errorType === "Mispronunciation") return "word-poor";
+  if (word.isFlagged || word.errorType !== "None") return "word-poor";
   if (word.accuracyScore >= 80) return "word-good";
   if (word.accuracyScore >= 60) return "word-fair";
   return "word-poor";
@@ -243,26 +304,33 @@ function SessionView({
 
   // --- Transcript state ---
   const [fallbackLines, setFallbackLines] = useState<TranscriptLine[]>([]);
-  const primaryLines = useMemo(
-    () =>
-      transcriptions.map((entry) => ({
+  const primaryLines = useMemo(() => {
+    let acc: TranscriptLine[] = [];
+    for (const entry of transcriptions) {
+      acc = upsertLine(acc, {
         id: entry.streamInfo.id,
         text: entry.text,
         isFinal:
           entry.streamInfo.attributes?.["lk.transcription_final"] === "true",
         receivedAt: entry.streamInfo.timestamp,
-      })),
-    [transcriptions]
-  );
+      });
+    }
+    return acc;
+  }, [transcriptions]);
   const usePrimary = primaryLines.length > 0;
   const lines = usePrimary ? primaryLines.slice(-50) : fallbackLines;
   const summary = useMemo(() => summarize(lines), [lines]);
 
   // --- Phase 3+4 state ---
-  const [sessionState, setSessionState] = useState<SessionState>("connecting");
+  const [sessionState, setSessionState] = useState<SessionState>(() =>
+    connectionState === ConnectionState.Connected ? "listening" : "connecting"
+  );
   const [targetSentence, setTargetSentence] = useState<TargetSentence | null>(null);
   const [pronunciation, setPronunciation] = useState<PronunciationData | null>(null);
   const [coaching, setCoaching] = useState<CoachingData | null>(null);
+  const [pipelineMetrics, setPipelineMetrics] =
+    useState<PipelineMetrics | null>(null);
+  const [participantVersion, setParticipantVersion] = useState(0);
 
   // --- Fallback transcript handler ---
   useEffect(() => {
@@ -293,10 +361,6 @@ function SessionView({
 
   // --- Listen for data messages from agent ---
   useEffect(() => {
-    if (connectionState === ConnectionState.Connected) {
-      setSessionState("listening");
-    }
-
     const handleDataReceived = (
       payload: Uint8Array,
       participant?: Participant,
@@ -305,48 +369,128 @@ function SessionView({
     ) => {
       if (!topic) return;
 
+      let raw: unknown;
       try {
         const text = new TextDecoder().decode(payload);
-        const data = JSON.parse(text);
+        raw = JSON.parse(text);
+      } catch (e) {
+        console.warn("[EchoCoach] Failed to parse data message", topic, e);
+        return;
+      }
 
-        switch (topic) {
-          case "sentence":
-            setTargetSentence(data as TargetSentence);
-            break;
-          case "pronunciation":
-            setPronunciation(data as PronunciationData);
-            break;
-          case "coaching":
-            setCoaching(data as CoachingData);
-            break;
-          case "state":
-            if (data.state) {
-              setSessionState(data.state as SessionState);
-            }
-            break;
-          case "metrics":
-            console.log("[EchoCoach Metrics]", data);
-            break;
+      if (!isRecord(raw)) {
+        console.warn("[EchoCoach] Unexpected data payload shape", topic);
+        return;
+      }
+
+      switch (topic) {
+        case "sentence":
+          setTargetSentence({
+            id: toNumberValue(raw.id, 0),
+            text: toStringValue(raw.text, ""),
+            difficulty: toStringValue(raw.difficulty, ""),
+            category: toStringValue(raw.category, ""),
+          });
+          break;
+        case "pronunciation": {
+          if (participant && !isAgentParticipant(participant)) return;
+          const parsed: PronunciationData = {
+            recognizedText: toStringValue(raw.recognizedText, ""),
+            accuracyScore: toNumberValue(raw.accuracyScore, 0),
+            fluencyScore: toNumberValue(raw.fluencyScore, 0),
+            completenessScore: toNumberValue(raw.completenessScore, 0),
+            prosodyScore: toNumberValue(raw.prosodyScore, 0),
+            words: toWordList(raw.words),
+            flaggedWords: toWordList(raw.flaggedWords),
+            hasIssues: raw.hasIssues === true,
+            assessmentLatencyMs:
+              typeof raw.assessmentLatencyMs === "number" &&
+              Number.isFinite(raw.assessmentLatencyMs)
+                ? raw.assessmentLatencyMs
+                : undefined,
+          };
+          setPronunciation(parsed);
+          if (!parsed.hasIssues) {
+            setCoaching(null);
+          }
+          break;
         }
-      } catch {
-        // Not JSON — ignore
+        case "coaching": {
+          if (participant && !isAgentParticipant(participant)) return;
+          setCoaching({
+            coachingText: toStringValue(raw.coachingText, ""),
+            wordsToModel: toStringList(raw.wordsToModel),
+            latencyMs: toNumberValue(raw.latencyMs, 0),
+            source: toStringValue(raw.source, ""),
+          });
+          break;
+        }
+        case "state": {
+          const s = raw.state;
+          if (
+            typeof s !== "string" ||
+            !(KNOWN_STATES as readonly string[]).includes(s)
+          ) {
+            return;
+          }
+          setSessionState(s as SessionState);
+          break;
+        }
+        case "metrics": {
+          if (participant && !isAgentParticipant(participant)) return;
+          setPipelineMetrics({
+            totalPipelineMs: toNumberValue(raw.totalPipelineMs, 0),
+            correctionLatencyMs: toNumberValue(raw.correctionLatencyMs, 0),
+          });
+          break;
+        }
       }
     };
 
+    const handleConnected = () => {
+      setSessionState("listening");
+    };
+
     room.on(RoomEvent.DataReceived, handleDataReceived);
+    room.on(RoomEvent.Connected, handleConnected);
     return () => {
       room.off(RoomEvent.DataReceived, handleDataReceived);
+      room.off(RoomEvent.Connected, handleConnected);
     };
-  }, [room, connectionState]);
+  }, [room]);
+
+  useEffect(() => {
+    const bump = () => {
+      setParticipantVersion((v) => v + 1);
+    };
+    room.on(RoomEvent.ParticipantConnected, bump);
+    room.on(RoomEvent.ParticipantDisconnected, bump);
+    room.on(RoomEvent.Connected, bump);
+    return () => {
+      room.off(RoomEvent.ParticipantConnected, bump);
+      room.off(RoomEvent.ParticipantDisconnected, bump);
+      room.off(RoomEvent.Connected, bump);
+    };
+  }, [room]);
+
+  useEffect(() => {
+    if (sessionState !== "assessing" && sessionState !== "coaching") return;
+    const timer = setTimeout(() => {
+      setSessionState("listening");
+    }, 20000);
+    return () => clearTimeout(timer);
+  }, [sessionState]);
+
+  const agentParticipant = useMemo(() => {
+    void participantVersion;
+    return findAgent(room.remoteParticipants.values());
+  }, [room, participantVersion]);
+  const agentMissing = !agentParticipant;
 
   // --- RPC: Request next sentence ---
   const handleNextSentence = useCallback(async () => {
     try {
-      // Find the agent participant
-      const participants = Array.from(room.remoteParticipants.values());
-      const agent = participants.find(
-        (p) => p.identity.includes("agent") || p.permissions?.canPublish
-      );
+      const agent = agentParticipant;
       if (!agent) {
         console.warn("No agent participant found for RPC");
         return;
@@ -361,17 +505,22 @@ function SessionView({
     } catch (e) {
       console.error("next_sentence RPC failed:", e);
     }
-  }, [room]);
+  }, [room, agentParticipant]);
+
+  const handleRetry = useCallback(() => {
+    setPronunciation(null);
+    setCoaching(null);
+  }, []);
 
   // --- RPC: Hear a word ---
   const handleHearWord = useCallback(
     async (word: string, speed: "normal" | "slow") => {
       try {
-        const participants = Array.from(room.remoteParticipants.values());
-        const agent = participants.find(
-          (p) => p.identity.includes("agent") || p.permissions?.canPublish
-        );
-        if (!agent) return;
+        const agent = agentParticipant;
+        if (!agent) {
+          console.warn("No agent participant found for RPC");
+          return;
+        }
         await room.localParticipant.performRpc({
           destinationIdentity: agent.identity,
           method: "hear_word",
@@ -381,7 +530,7 @@ function SessionView({
         console.error("hear_word RPC failed:", e);
       }
     },
-    [room]
+    [room, agentParticipant]
   );
 
   const visibleLines = lines.slice(-6);
@@ -397,6 +546,15 @@ function SessionView({
         </div>
       </div>
 
+      {agentMissing && (
+        <div
+          className="agent-error"
+          style={{ color: "var(--accent-rose)", fontSize: 13, textAlign: "center" }}
+        >
+          Agent not connected — voice actions disabled
+        </div>
+      )}
+
       {/* Target Sentence Card */}
       {targetSentence && (
         <div className="glass-card target-sentence-card">
@@ -410,9 +568,21 @@ function SessionView({
           <div className="target-sentence-text">
             &ldquo;{targetSentence.text}&rdquo;
           </div>
+          {pronunciation && pronunciation.recognizedText && (
+            <div className="recognized-text" style={{ fontSize: 13, marginTop: 8 }}>
+              Heard: &ldquo;{pronunciation.recognizedText}&rdquo;
+            </div>
+          )}
           <div className="target-sentence-actions">
-            <button className="btn btn-secondary" onClick={handleNextSentence}>
+            <button
+              className="btn btn-secondary"
+              onClick={handleNextSentence}
+              disabled={agentMissing}
+            >
               ↻ Next Sentence
+            </button>
+            <button className="btn btn-secondary" onClick={handleRetry}>
+              Retry
             </button>
           </div>
         </div>
@@ -468,6 +638,9 @@ function SessionView({
           <div className="pronunciation-header">
             <span className="pronunciation-label">
               Pronunciation Scores
+            </span>
+            <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+              Flag threshold 60
             </span>
             <div className="score-stats">
               <div className="score-stat">
@@ -535,39 +708,75 @@ function SessionView({
                   {Math.round(pronunciation.assessmentLatencyMs)}ms
                 </span>
               </div>
+              {pipelineMetrics && (
+                <>
+                  <div className="metric-pill">
+                    Total pipeline{" "}
+                    <span className="metric-value">
+                      {Math.round(pipelineMetrics.totalPipelineMs)}ms
+                    </span>
+                  </div>
+                  <div className="metric-pill">
+                    Correction{" "}
+                    <span className="metric-value">
+                      {Math.round(pipelineMetrics.correctionLatencyMs)}ms
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+          {!pronunciation.assessmentLatencyMs && pipelineMetrics && (
+            <div className="metrics-bar" style={{ marginTop: 12 }}>
+              <div className="metric-pill">
+                Total pipeline{" "}
+                <span className="metric-value">
+                  {Math.round(pipelineMetrics.totalPipelineMs)}ms
+                </span>
+              </div>
+              <div className="metric-pill">
+                Correction{" "}
+                <span className="metric-value">
+                  {Math.round(pipelineMetrics.correctionLatencyMs)}ms
+                </span>
+              </div>
             </div>
           )}
         </div>
       )}
 
       {/* Coaching Card */}
-      {coaching && coaching.wordsToModel.length > 0 && (
+      {coaching && (
         <div className="glass-card coaching-card fade-in">
           <div className="coaching-label">🎓 Coach Feedback</div>
           <div className="coaching-text">
             &ldquo;{coaching.coachingText}&rdquo;
           </div>
-          <div className="correction-words">
-            {coaching.wordsToModel.map((word) => (
-              <div key={word} className="correction-word">
-                <span className="cw-text">{word}</span>
-                <div className="cw-buttons">
-                  <button
-                    className="btn-hear"
-                    onClick={() => handleHearWord(word, "normal")}
-                  >
-                    🔊 Normal
-                  </button>
-                  <button
-                    className="btn-hear slow"
-                    onClick={() => handleHearWord(word, "slow")}
-                  >
-                    🐢 Slow
-                  </button>
+          {coaching.wordsToModel.length > 0 && (
+            <div className="correction-words">
+              {coaching.wordsToModel.map((word, i) => (
+                <div key={`${word}-${i}`} className="correction-word">
+                  <span className="cw-text">{word}</span>
+                  <div className="cw-buttons">
+                    <button
+                      className="btn-hear"
+                      onClick={() => handleHearWord(word, "normal")}
+                      disabled={agentMissing}
+                    >
+                      🔊 Normal
+                    </button>
+                    <button
+                      className="btn-hear slow"
+                      onClick={() => handleHearWord(word, "slow")}
+                      disabled={agentMissing}
+                    >
+                      🐢 Slow
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
           {coaching.latencyMs > 0 && (
             <div className="metrics-bar" style={{ marginTop: 12 }}>
               <div className="metric-pill">
@@ -578,6 +787,25 @@ function SessionView({
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {pipelineMetrics && !pronunciation && (
+        <div className="glass-card metrics-panel">
+          <div className="metrics-bar">
+            <div className="metric-pill">
+              Total pipeline{" "}
+              <span className="metric-value">
+                {Math.round(pipelineMetrics.totalPipelineMs)}ms
+              </span>
+            </div>
+            <div className="metric-pill">
+              Correction{" "}
+              <span className="metric-value">
+                {Math.round(pipelineMetrics.correctionLatencyMs)}ms
+              </span>
+            </div>
+          </div>
         </div>
       )}
 

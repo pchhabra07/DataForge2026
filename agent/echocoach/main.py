@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import struct
 import time
 
 from dotenv import load_dotenv
@@ -38,7 +39,7 @@ RIME_MODEL = "coda"
 RIME_VOICE = "celeste"
 RIME_LANGUAGE = "en"
 RIME_NORMAL_SPEED = 1.0
-RIME_SLOW_SPEED = 1.5  # >1.0 = slower delivery for word-by-word coaching
+RIME_SLOW_SPEED = 1.5  # timeScaleFactor >1.0 = slower delivery for coaching
 
 # LiveKit audio is typically 48kHz
 LIVEKIT_SAMPLE_RATE = 48000
@@ -103,13 +104,27 @@ async def echocoach_session(ctx: agents.JobContext):
         ),
     )
 
-    # Slow-speed Rime TTS instance for word-by-word coaching
+    # Slow-speed Rime TTS instance for word-by-word coaching.
+    # HTTP one-shot with timeScaleFactor >1.0 = slower. WebSocket is not
+    # used here because per-call voice override is unsupported by say().
     slow_tts = rime.TTS(
         model=RIME_MODEL,
         speaker=RIME_VOICE,
-        speed_alpha=RIME_SLOW_SPEED,
-        use_websocket=True,
+        time_scale_factor=RIME_SLOW_SPEED,
+        use_websocket=False,
     )
+
+    async def say_slow(text: str):
+        """Speak text at slow coaching speed via the HTTP slow voice."""
+        frames: list[rtc.AudioFrame] = []
+        async for chunk in slow_tts.synthesize(text):
+            frames.append(chunk.frame)
+
+        async def _play():
+            for f in frames:
+                yield f
+
+        await session.say(text, audio=_play())
 
     # Start the session
     await session.start(
@@ -135,12 +150,15 @@ async def echocoach_session(ctx: agents.JobContext):
             logger.exception("Failed to send data to client (topic=%s)", topic)
 
     # --- Send initial target sentence ---
-    await send_to_client("sentence", {
-        "id": current_sentence.id,
-        "text": current_sentence.text,
-        "difficulty": current_sentence.difficulty,
-        "category": current_sentence.category,
-    })
+    await send_to_client(
+        "sentence",
+        {
+            "id": current_sentence.id,
+            "text": current_sentence.text,
+            "difficulty": current_sentence.difficulty,
+            "category": current_sentence.category,
+        },
+    )
 
     # --- Speak greeting with target sentence ---
     greeting = (
@@ -153,20 +171,31 @@ async def echocoach_session(ctx: agents.JobContext):
     logger.info(f"Rime greeting latency: {(t_done - t_speak) * 1000:.0f}ms")
 
     # --- Audio capture buffer ---
-    audio_buffer: bytearray = bytearray()
-    is_capturing = False
+    # One utterance is assessed and coached at a time so slow speech
+    # never overlaps itself when the user speaks rapidly.
+    def _serialize_utterances(fn):
+        lock = asyncio.Lock()
+
+        async def wrapper(*args, **kwargs):
+            async with lock:
+                return await fn(*args, **kwargs)
+
+        return wrapper
 
     # --- Handle RPC calls from client ---
     @ctx.room.local_participant.register_rpc_method("next_sentence")
     async def handle_next_sentence(data: rtc.RpcInvocationData):
         nonlocal current_sentence
         current_sentence = get_next_sentence(current_sentence.id)
-        await send_to_client("sentence", {
-            "id": current_sentence.id,
-            "text": current_sentence.text,
-            "difficulty": current_sentence.difficulty,
-            "category": current_sentence.category,
-        })
+        await send_to_client(
+            "sentence",
+            {
+                "id": current_sentence.id,
+                "text": current_sentence.text,
+                "difficulty": current_sentence.difficulty,
+                "category": current_sentence.category,
+            },
+        )
         await session.say(f"Great, let's try this one: {current_sentence.text}")
         return json.dumps({"id": current_sentence.id, "text": current_sentence.text})
 
@@ -182,10 +211,7 @@ async def echocoach_session(ctx: agents.JobContext):
 
             if speed == "slow":
                 # Use slow TTS for word-by-word modeling
-                await session.say(
-                    word,
-                    tts=slow_tts,
-                )
+                await say_slow(word)
             else:
                 await session.say(word)
             return json.dumps({"ok": True, "word": word, "speed": speed})
@@ -194,6 +220,7 @@ async def echocoach_session(ctx: agents.JobContext):
             return json.dumps({"error": str(e)})
 
     # --- Process user audio for pronunciation assessment ---
+    @_serialize_utterances
     async def process_utterance(audio_data: bytes):
         """Run pronunciation assessment + coaching on captured audio."""
         nonlocal current_sentence
@@ -258,10 +285,7 @@ async def echocoach_session(ctx: agents.JobContext):
             for word in correction.words_to_model:
                 await session.say(f"The word is: {word}")
                 await asyncio.sleep(0.3)  # Brief pause
-                await session.say(
-                    f"Now slowly: {word}",
-                    tts=slow_tts,
-                )
+                await say_slow(f"Now slowly: {word}")
                 await asyncio.sleep(0.3)
 
             t_correction_end = time.perf_counter()
@@ -274,12 +298,15 @@ async def echocoach_session(ctx: agents.JobContext):
                 total_ms,
             )
 
-            await send_to_client("metrics", {
-                "assessmentLatencyMs": round(assess_ms, 1),
-                "correctionLatencyMs": round(correction_ms, 1),
-                "totalPipelineMs": round(total_ms, 1),
-                "correctionSource": correction.source,
-            })
+            await send_to_client(
+                "metrics",
+                {
+                    "assessmentLatencyMs": round(assess_ms, 1),
+                    "correctionLatencyMs": round(correction_ms, 1),
+                    "totalPipelineMs": round(total_ms, 1),
+                    "correctionSource": correction.source,
+                },
+            )
 
             await session.say("Now try reading the sentence again!")
         else:
@@ -291,17 +318,13 @@ async def echocoach_session(ctx: agents.JobContext):
     # --- Audio stream capture loop ---
     # Wait for the user participant to join and publish audio
     async def capture_audio_loop():
-        nonlocal audio_buffer, is_capturing
-
         # Wait for a remote participant with an audio track
         while True:
             participants = ctx.room.remote_participants
             for p in participants.values():
                 for pub in p.track_publications.values():
                     if pub.track and pub.track.kind == rtc.TrackKind.KIND_AUDIO:
-                        logger.info(
-                            "Found audio track from participant %s", p.identity
-                        )
+                        logger.info("Found audio track from participant %s", p.identity)
                         audio_track = pub.track
                         audio_stream = rtc.AudioStream(audio_track)
 
@@ -315,6 +338,13 @@ async def echocoach_session(ctx: agents.JobContext):
 
                         async for event in audio_stream:
                             frame = event.frame
+                            if frame.sample_rate != LIVEKIT_SAMPLE_RATE or frame.num_channels != 1:
+                                logger.debug(
+                                    "Skipping frame with unexpected format: %dHz %dch",
+                                    frame.sample_rate,
+                                    frame.num_channels,
+                                )
+                                continue
                             frame_bytes = bytes(frame.data)
 
                             # Simple energy-based speech detection
@@ -354,8 +384,6 @@ async def echocoach_session(ctx: agents.JobContext):
 
 def _compute_energy(frame_bytes: bytes) -> float:
     """Compute RMS energy of a 16-bit PCM audio frame."""
-    import struct
-
     if len(frame_bytes) < 2:
         return 0.0
     num_samples = len(frame_bytes) // 2
