@@ -418,12 +418,6 @@ function SessionView({
   const [slowMode, setSlowMode] = useState(false);
 
   const [modelStatus, setModelStatus] = useState<string | null>(null);
-  const [modelProgress, setModelProgress] = useState<{
-    percent: number;
-    downloadedMb: number;
-    totalMb: number;
-    file: string;
-  } | null>(null);
   const [micMuted, setMicMuted] = useState(false);
 
   const [sessionStart, setSessionStart] = useState<number | null>(() => null);
@@ -579,19 +573,7 @@ function SessionView({
             setModelStatus(s);
           }
           if (s === "downloading") {
-            const total = toNumberValue(raw.totalBytes, 0);
-            const done = toNumberValue(raw.downloadedBytes, 0);
-            const pct = toNumberValue(raw.percent, 0);
             setModelStatus("downloading");
-            setModelProgress({
-              percent: pct,
-              downloadedMb: Math.round((done / 1048576) * 10) / 10,
-              totalMb: Math.round((total / 1048576) * 10) / 10,
-              file: toStringValue(raw.file, ""),
-            });
-          }
-          if (s === "ready" || s === "error") {
-            setModelProgress(null);
           }
           break;
         }
@@ -810,31 +792,20 @@ function SessionView({
         const ready = modelStatus === "ready";
         if (ready) return null;
         const isError = modelStatus === "error";
-        const pct = modelProgress?.percent ?? 0;
         const label = agentMissing
           ? "Waiting for coach to join..."
           : isError
             ? "Scoring model failed to load - check agent terminal"
-            : modelStatus === "downloading"
-              ? `Downloading scoring model ${pct}% - ${modelProgress?.downloadedMb ?? 0}/${modelProgress?.totalMb ?? 0} MB`
-              : "Preparing scoring model - first run takes a moment...";
+            : "Model download ho raha hai. Thoda wait karo.";
         return (
           <div className="modal-overlay fade-in" role="dialog" aria-modal="true">
             <div className="modal" onClick={(e) => e.stopPropagation()}>
               <div className="modal-kicker">Setup needed</div>
               <p className="modal-sentence">{label}</p>
-              {!isError && (
-                <div className="progress-track">
-                  <div
-                    className="progress-fill"
-                    style={{ width: `${Math.min(100, pct)}%` }}
-                  />
-                </div>
-              )}
               <p className="modal-hint">
                 {agentMissing
-                  ? "Start the agent with python -m echocoach.main dev then rejoin. Terminal shows live percent."
-                  : "Keep this tab open. Speaking unlocks at 100 percent."}
+                  ? "Start the agent with python -m echocoach.main dev then rejoin."
+                  : "Live percent terminal me dikhega. Ready hote hi ye hat jayega."}
               </p>
             </div>
           </div>
