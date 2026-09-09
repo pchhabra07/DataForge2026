@@ -12,21 +12,16 @@ import { AccessToken, AgentDispatchClient } from "livekit-server-sdk";
 
 export async function GET(req: NextRequest) {
   try {
-    const room = req.nextUrl.searchParams.get("room") || "echocoach-dev";
-    const identity =
-      req.nextUrl.searchParams.get("identity") ||
-      `user-${Math.random().toString(36).slice(2, 8)}`;
+    const rawRoom = req.nextUrl.searchParams.get("room") || "echocoach-dev";
+    const room = rawRoom.trim().toLowerCase();
+    if (!/^[a-z0-9-]{3,64}$/.test(room)) {
+      return NextResponse.json({ error: "Invalid room name" }, { status: 400 });
+    }
+    const identity = `user-${crypto.randomUUID().slice(0, 8)}`;
 
     const apiKey = process.env.LIVEKIT_API_KEY;
     const apiSecret = process.env.LIVEKIT_API_SECRET;
     const livekitUrl = process.env.LIVEKIT_URL;
-
-    console.log("[token] ENV check:", {
-      hasApiKey: !!apiKey,
-      hasApiSecret: !!apiSecret,
-      hasUrl: !!livekitUrl,
-      url: livekitUrl?.slice(0, 20),
-    });
 
     if (!apiKey || !apiSecret || !livekitUrl) {
       return NextResponse.json(
@@ -42,6 +37,7 @@ export async function GET(req: NextRequest) {
     const token = new AccessToken(apiKey, apiSecret, {
       identity,
       name: identity,
+      ttl: "5m",
     });
     token.addGrant({
       roomJoin: true,
@@ -53,15 +49,18 @@ export async function GET(req: NextRequest) {
     const jwt = await token.toJwt();
 
     try {
-      const httpHost = livekitUrl.replace(/^wss:/, "https:");
+      const httpHost = livekitUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
       const dispatchClient = new AgentDispatchClient(
         httpHost,
         apiKey,
         apiSecret
       );
       await dispatchClient.createDispatch(room, "echocoach");
-    } catch (e) {
-      console.warn("Agent dispatch failed (non-fatal), agent may not join:", e);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/already|exists|conflict|duplicate/i.test(msg)) {
+        console.warn("Agent dispatch failed (non-fatal), agent may not join:", e);
+      }
     }
 
     return NextResponse.json({

@@ -23,7 +23,6 @@ import numpy as np
 
 logger = logging.getLogger("echocoach.pronunciation")
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 # Flag threshold: words below this score get flagged for correction
@@ -57,7 +56,7 @@ class WordScore:
 
     @property
     def is_flagged(self) -> bool:
-        return self.accuracy_score < DEFAULT_FLAG_THRESHOLD or self.error_type == "Mispronunciation"
+        return self.accuracy_score < DEFAULT_FLAG_THRESHOLD or self.error_type != "None"
 
     def to_dict(self) -> dict:
         return {
@@ -136,19 +135,17 @@ def resample_pcm(
     if out_len == 0:
         return b""
 
-    # Linear interpolation resample
-    resampled = []
-    for i in range(out_len):
-        src_pos = i / ratio
-        idx = int(src_pos)
-        frac = src_pos - idx
-        if idx + 1 < num_samples:
-            val = samples[idx] * (1 - frac) + samples[idx + 1] * frac
-        else:
-            val = samples[min(idx, num_samples - 1)]
-        resampled.append(int(max(-32768, min(32767, val))))
+    # Linear interpolation resample via numpy (fast path)
+    import numpy as np
 
-    return struct.pack(f"<{len(resampled)}h", *resampled)
+    src = np.asarray(samples, dtype=np.float32)
+    if out_len == num_samples:
+        clipped = np.clip(src, -32768, 32767).astype(np.int16)
+        return clipped.tobytes()
+    src_pos = np.arange(out_len, dtype=np.float64) / ratio
+    resampled = np.interp(src_pos, np.arange(num_samples, dtype=np.float64), src)
+    clipped = np.clip(np.rint(resampled), -32768, 32767).astype(np.int16)
+    return clipped.tobytes()
 
 
 async def assess_pronunciation(
@@ -200,11 +197,12 @@ async def warmup_free_assessor(on_status=None) -> None:
 def _ensure_model_cached() -> None:
     """Download model files with live progress, no-op when already cached."""
     from huggingface_hub import snapshot_download
-    from tqdm.asyncio import tqdm_asyncio
+    from tqdm import tqdm
 
-    class _ProgressTqdm(tqdm_asyncio):
+    class _ProgressTqdm(tqdm):
         def __init__(self, *args, **kwargs):
-            kwargs["disable"] = True
+            kwargs.setdefault("disable", False)
+            kwargs.setdefault("leave", False)
             super().__init__(*args, **kwargs)
             _set_progress(
                 file=str(self.desc or ""),
@@ -217,13 +215,18 @@ def _ensure_model_cached() -> None:
             _set_progress(downloaded=self.n or 0, total=self.total or 0)
             return out
 
+    logger.info("Checking pronunciation model cache...")
     _set_progress(phase="downloading", file="", downloaded=0, total=0)
     try:
         snapshot_download(
             repo_id="vitouphy/wav2vec2-xls-r-300m-timit-phoneme",
             tqdm_class=_ProgressTqdm,
         )
-    finally:
+    except Exception:
+        with _PROGRESS_LOCK:
+            _PROGRESS["phase"] = "error"
+        raise
+    else:
         with _PROGRESS_LOCK:
             _PROGRESS["phase"] = "cached" if _PROGRESS.get("total") else "loading"
 
@@ -241,8 +244,9 @@ def _get_scorer():
         from pronounce_assess.models import PronounceAssessModel
 
         t0 = time.perf_counter()
+        logger.info("Loading pronunciation weights on cpu - about 40s first boot...")
         _SCORER = PronounceAssessModel(device="cpu")
-        logger.info("Pronunciation model loaded in %.1fs", time.perf_counter() - t0)
+        logger.info("Pronunciation model ready in %.1fs", time.perf_counter() - t0)
         return _SCORER
 
 
@@ -253,7 +257,7 @@ def _mock_pronunciation_assessment(reference_text: str) -> PronunciationResult:
     """
     import re
 
-    words_raw = re.findall(r"\b[\w'-]+\b", reference_text)
+    words_raw = re.findall(r"[A-Za-z']+", reference_text)
     if not words_raw:
         words_raw = reference_text.split()
 
@@ -332,10 +336,14 @@ def _assess_pronunciation_sync(
         return None
 
     samples = np.frombuffer(pcm_16k, dtype=np.int16).astype(np.float32) / 32768.0
+    peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+    rms = float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
 
     logger.info(
-        "Running free pronunciation assessment: %d bytes PCM, ref=%r",
+        "Running free pronunciation assessment: %d bytes PCM, peak=%.3f rms=%.4f ref=%r",
         len(audio_bytes),
+        peak,
+        rms,
         reference_text[:60],
     )
     t0 = time.perf_counter()
@@ -397,7 +405,7 @@ def _assess_pronunciation_sync(
             err = "Mispronunciation"
         else:
             err = "None"
-        heard = sum(1 for label, g in zip(labels, gops) if label != "omitted" or g > 0)
+        heard = sum(1 for label in labels if label != "omitted")
         if heard * 2 >= n:
             aligned_words += 1
         scored_rows.append((w, word_acc, err))
@@ -425,11 +433,25 @@ def _assess_pronunciation_sync(
     )
 
     logger.info(
-        "Free assessment in %.0fms: accuracy=%.1f, flagged=%d words",
+        "Assessment in %.0fms: acc=%.1f comp=%.1f aligned=%d/%d events=%d flagged=%d",
         score_ms,
         sent_mean,
+        completeness,
+        aligned_words,
+        max(len(phoneme_words), 1),
+        len(events),
         sum(1 for ws in word_scores if ws.is_flagged),
     )
+    if completeness < 20:
+        gops_dbg = [round(float(e.gop), 2) if e.gop is not None else None for e in events[:12]]
+        logger.info(
+            "Low completeness debug: peak=%.3f rms=%.4f ref_phns=%d events=%d gops=%s",
+            peak,
+            rms,
+            len(sentence_phns),
+            len(events),
+            gops_dbg,
+        )
     return PronunciationResult(
         recognized_text=reference_text,
         accuracy_score=sent_mean,

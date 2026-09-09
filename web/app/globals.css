@@ -277,7 +277,7 @@ body::before {
 .modal {
   position: relative;
   width: 100%;
-  max-width: 560px;
+  max-width: 760px;
   background: var(--stage-lift);
   border: 1px solid var(--line);
   border-radius: 20px;

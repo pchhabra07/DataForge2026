@@ -20,7 +20,7 @@ import {
   toPipelineSnapshot,
 } from "./lib/metrics";
 import type { TranscriptLine, PipelineSnapshot } from "./lib/metrics";
-import { FIRST_SENTENCE } from "./lib/sentences";
+import { FIRST_SENTENCE, SENTENCES } from "./lib/sentences";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -116,19 +116,27 @@ function toWordList(value: unknown): WordScoreData[] {
   return out;
 }
 
-function isAgentParticipant(p: Participant): boolean {
-  if (p.identity === "echocoach") return true;
-  if (p.identity.toLowerCase().includes("agent")) return true;
-  return p.permissions?.canPublish === true;
+function isAgentParticipant(p: Participant, selfIdentity?: string): boolean {
+  if (selfIdentity && p.identity === selfIdentity) return false;
+  const id = p.identity.toLowerCase();
+  if (id === "echocoach" || id.includes("echocoach")) return true;
+  // Random rooms hold only you plus the coach, so any other remote peer is the coach.
+  return true;
 }
 
 function findAgent(
-  participants: Iterable<Participant>
+  participants: Iterable<Participant>,
+  selfIdentity?: string,
 ): Participant | undefined {
-  const list = Array.from(participants);
+  const list = Array.from(participants).filter((p) =>
+    selfIdentity ? p.identity !== selfIdentity : true
+  );
+  if (list.length === 0) return undefined;
   const exact = list.find((p) => p.identity === "echocoach");
   if (exact) return exact;
-  return list.find((p) => p.permissions?.canPublish === true);
+  const contains = list.find((p) => p.identity.toLowerCase().includes("echocoach"));
+  if (contains) return contains;
+  return list[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -139,13 +147,29 @@ export default function Home() {
     useState<TokenResponse | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showExample, setShowExample] = useState(true);
+  const [showExample, setShowExample] = useState(() => {
+    try {
+      return typeof window === "undefined" ? true : localStorage.getItem("ec-seen") !== "1";
+    } catch {
+      return true;
+    }
+  });
+
+  const dismissExample = useCallback(() => {
+    setShowExample(false);
+    try {
+      localStorage.setItem("ec-seen", "1");
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
 
   const handleConnect = useCallback(async () => {
     setIsConnecting(true);
     setError(null);
     try {
-      const resp = await fetch("/api/token?room=echocoach-dev");
+      const room = `coach-${crypto.randomUUID().slice(0, 8)}`;
+      const resp = await fetch(`/api/token?room=${encodeURIComponent(room)}`);
       if (!resp.ok) {
         const body = await resp.json();
         throw new Error(body.error || `HTTP ${resp.status}`);
@@ -214,12 +238,17 @@ export default function Home() {
           {showExample && (
             <div
               className="modal-overlay fade-in"
-              onClick={() => setShowExample(false)}
+              onClick={dismissExample}
+              role="dialog"
+              aria-modal="true"
+              onKeyDown={(e) => {
+                if (e.key === "Escape") dismissExample();
+              }}
             >
               <div className="modal" onClick={(e) => e.stopPropagation()}>
                 <button
                   className="modal-close"
-                  onClick={() => setShowExample(false)}
+                  onClick={dismissExample}
                   aria-label="Dismiss"
                 >
                   ×
@@ -230,29 +259,51 @@ export default function Home() {
                 <p className="modal-sentence">
                   &ldquo;{FIRST_SENTENCE.text}&rdquo;
                 </p>
+                <div className="modal-kicker" style={{ marginTop: 20 }}>
+                  Sample scoring
+                </div>
+                <div className="attempt-line" style={{ fontSize: 20 }}>
+                  {[
+                    ["The", 51],
+                    ["quick", 100],
+                    ["brown", 100],
+                    ["fox", 100],
+                    ["jumps", 100],
+                    ["over", 58],
+                    ["the", 100],
+                    ["lazy", 100],
+                    ["dog", 100],
+                  ].map(([w, s], i) => (
+                    <span
+                      key={`${w as string}-${i}`}
+                      className={`w ${
+                        (s as number) >= 80
+                          ? "w-good"
+                          : (s as number) >= 60
+                            ? "w-fair"
+                            : "w-poor"
+                      }`}
+                    >
+                      {w}
+                      <sup>{s}</sup>
+                    </span>
+                  ))}
+                </div>
+                <div className="score-strip">
+                  <div className="score-cell">
+                    Accuracy <b className="fair">90</b>
+                  </div>
+                  <div className="score-cell">
+                    Flagged <b className="poor">2</b>
+                  </div>
+                  <div className="score-cell">
+                    <span className="thresh">real engine output on clean audio</span>
+                  </div>
+                </div>
                 <p className="modal-hint">
-                  Read this aloud after you start. The coach scores every
-                  word and speaks the fix back.
+                  Close this and press Start below. Read the sentence aloud
+                  and the coach scores you live, then speaks the fix back.
                 </p>
-                <button
-                  className="start-btn"
-                  onClick={() => {
-                    setShowExample(false);
-                    handleConnect();
-                  }}
-                  disabled={isConnecting}
-                >
-                  {isConnecting ? (
-                    <>
-                      <span className="spinner" />
-                      Connecting
-                    </>
-                  ) : (
-                    <>
-                      Start Coaching Session <span className="arrow">→</span>
-                    </>
-                  )}
-                </button>
               </div>
             </div>
           )}
@@ -378,6 +429,7 @@ function SessionView({
   const [sessionStart, setSessionStart] = useState<number | null>(() => null);
   const [sessionElapsed, setSessionElapsed] = useState(0);
   const [nextBusy, setNextBusy] = useState(false);
+  const [rpcError, setRpcError] = useState<string | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [showMetrics, setShowMetrics] = useState(false);
@@ -460,7 +512,7 @@ function SessionView({
 
       switch (topic) {
         case "sentence":
-          if (participant && !isAgentParticipant(participant)) return;
+          if (participant && !isAgentParticipant(participant, userIdentity)) return;
           setTargetSentence({
             id: toNumberValue(raw.id, 0),
             text: toStringValue(raw.text, ""),
@@ -469,7 +521,7 @@ function SessionView({
           });
           break;
         case "pronunciation": {
-          if (participant && !isAgentParticipant(participant)) return;
+          if (participant && !isAgentParticipant(participant, userIdentity)) return;
           const parsed: PronunciationData = {
             recognizedText: toStringValue(raw.recognizedText, ""),
             accuracyScore: toNumberValue(raw.accuracyScore, 0),
@@ -493,7 +545,7 @@ function SessionView({
           break;
         }
         case "coaching": {
-          if (participant && !isAgentParticipant(participant)) return;
+          if (participant && !isAgentParticipant(participant, userIdentity)) return;
           setCoaching({
             coachingText: toStringValue(raw.coachingText, ""),
             wordsToModel: toStringList(raw.wordsToModel),
@@ -504,7 +556,7 @@ function SessionView({
           break;
         }
         case "state": {
-          if (participant && !isAgentParticipant(participant)) return;
+          if (participant && !isAgentParticipant(participant, userIdentity)) return;
           const s = raw.state;
           if (
             typeof s !== "string" ||
@@ -516,12 +568,12 @@ function SessionView({
           break;
         }
         case "metrics": {
-          if (participant && !isAgentParticipant(participant)) return;
+          if (participant && !isAgentParticipant(participant, userIdentity)) return;
           setPipelineMetrics(toPipelineSnapshot(raw));
           break;
         }
         case "model_status": {
-          if (participant && !isAgentParticipant(participant)) return;
+          if (participant && !isAgentParticipant(participant, userIdentity)) return;
           const s = toStringValue(raw.status, "");
           if (s === "loading" || s === "ready" || s === "error") {
             setModelStatus(s);
@@ -544,7 +596,8 @@ function SessionView({
           break;
         }
         case "interruption": {
-          if (participant && !isAgentParticipant(participant)) return;
+          if (participant && !isAgentParticipant(participant, userIdentity)) return;
+          if (raw.source !== "skip_button") break;
           setShowSkippedToast(true);
           if (toastTimerRef.current) {
             clearTimeout(toastTimerRef.current);
@@ -585,24 +638,56 @@ function SessionView({
   useEffect(() => {
     if (sessionState !== "assessing" && sessionState !== "coaching") return;
     const timer = setTimeout(() => {
-      setSessionState("listening");
+      setSessionState((s) => (s === "assessing" || s === "coaching" ? "idle" : s));
     }, 20000);
     return () => clearTimeout(timer);
   }, [sessionState]);
 
   const agentParticipant = useMemo(() => {
     void participantVersion;
-    return findAgent(room.remoteParticipants.values());
-  }, [room, participantVersion]);
+    return findAgent(room.remoteParticipants.values(), userIdentity);
+  }, [room, participantVersion, userIdentity]);
   const agentMissing = !agentParticipant;
+
+  useEffect(() => {
+    if (!agentParticipant) return;
+    const id = setTimeout(async () => {
+      try {
+        await room.localParticipant.performRpc({
+          destinationIdentity: agentParticipant.identity,
+          method: "get_state",
+          payload: "",
+        });
+      } catch (e) {
+        console.warn("get_state resync failed:", e);
+      }
+    }, 500);
+    return () => clearTimeout(id);
+  }, [room, agentParticipant]);
 
   // --- RPC: Request next sentence ---
   const handleNextSentence = useCallback(async () => {
     if (nextBusy) return;
+    const fallbackNext = () => {
+      const base = targetSentence ?? FIRST_SENTENCE;
+      const idx = SENTENCES.findIndex((s) => s.id === base.id);
+      const next = SENTENCES[(idx + 1 + SENTENCES.length) % SENTENCES.length];
+      setTargetSentence({
+        id: next.id,
+        text: next.text,
+        difficulty: next.difficulty,
+        category: next.category,
+      });
+      setPronunciation(null);
+      setCoaching(null);
+      setPipelineMetrics(null);
+      setSessionState("listening");
+    };
     try {
       const agent = agentParticipant;
       if (!agent) {
-        console.warn("No agent participant found for RPC");
+        fallbackNext();
+        setRpcError("Agent offline - cycled locally");
         return;
       }
       setNextBusy(true);
@@ -615,12 +700,15 @@ function SessionView({
       setCoaching(null);
       setPipelineMetrics(null);
       setSessionState("listening");
+      setRpcError(null);
     } catch (e) {
       console.error("next_sentence RPC failed:", e);
+      fallbackNext();
+      setRpcError(e instanceof Error ? e.message : "Next sentence failed");
     } finally {
       setNextBusy(false);
     }
-  }, [room, agentParticipant, nextBusy]);
+  }, [room, agentParticipant, nextBusy, targetSentence]);
 
   const handleRetry = useCallback(() => {
     setPronunciation(null);
@@ -683,6 +771,8 @@ function SessionView({
 
   const visibleLines = lines.slice(-6);
   const isSpeaking = agentState === "speaking";
+  const modelReady = modelStatus === "ready";
+  const uiBlocked = agentMissing || !modelReady;
   const stateInfo = STATE_LABELS[sessionState] || STATE_LABELS.idle;
   const deckStatus =
     micMuted
@@ -716,27 +806,40 @@ function SessionView({
           />
         )}
       </div>
-      {modelStatus === "loading" && !modelProgress && (
-        <div className="agent-line">
-          Preparing scoring model — first attempt takes a moment…
-        </div>
-      )}
-      {modelStatus === "downloading" && modelProgress && (
-        <div className="model-dl">
-          <div className="model-dl-row">
-            <span>
-              Downloading scoring model · {modelProgress.percent}% ·{" "}
-              {modelProgress.downloadedMb}/{modelProgress.totalMb} MB
-            </span>
+      {(() => {
+        const ready = modelStatus === "ready";
+        if (ready) return null;
+        const isError = modelStatus === "error";
+        const pct = modelProgress?.percent ?? 0;
+        const label = agentMissing
+          ? "Waiting for coach to join..."
+          : isError
+            ? "Scoring model failed to load - check agent terminal"
+            : modelStatus === "downloading"
+              ? `Downloading scoring model ${pct}% - ${modelProgress?.downloadedMb ?? 0}/${modelProgress?.totalMb ?? 0} MB`
+              : "Preparing scoring model - first run takes a moment...";
+        return (
+          <div className="modal-overlay fade-in" role="dialog" aria-modal="true">
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-kicker">Setup needed</div>
+              <p className="modal-sentence">{label}</p>
+              {!isError && (
+                <div className="progress-track">
+                  <div
+                    className="progress-fill"
+                    style={{ width: `${Math.min(100, pct)}%` }}
+                  />
+                </div>
+              )}
+              <p className="modal-hint">
+                {agentMissing
+                  ? "Start the agent with python -m echocoach.main dev then rejoin. Terminal shows live percent."
+                  : "Keep this tab open. Speaking unlocks at 100 percent."}
+              </p>
+            </div>
           </div>
-          <div className="progress-track">
-            <div
-              className="progress-fill"
-              style={{ width: `${Math.min(100, modelProgress.percent)}%` }}
-            />
-          </div>
-        </div>
-      )}
+        );
+      })()}
       {modelStatus === "error" && (
         <div className="agent-line">
           Scoring model failed to load — check agent logs
@@ -745,38 +848,37 @@ function SessionView({
 
       {agentMissing && (
         <div className="agent-line">
-          Agent not connected — voice actions disabled
+          Agent not connected — start it with python -m echocoach.main dev then rejoin
         </div>
       )}
 
-      {targetSentence && (
-        <>
-          <div className="prompt-kicker" style={{ marginTop: 28 }}>
-            Read this aloud
-            {targetSentence.id ? ` · #${targetSentence.id}` : ""}
-            {targetSentence.difficulty || targetSentence.category ? " · " : ""}
-            <span className="prompt-meta" style={{ margin: 0 }}>
-              {targetSentence.difficulty ? (
-                <span className="lvl">{targetSentence.difficulty}</span>
-              ) : null}
-              {targetSentence.category ? (
-                <span>{targetSentence.category}</span>
-              ) : null}
-            </span>
-          </div>
-          <div className="prompt-text">
-            &ldquo;{targetSentence.text}&rdquo;
-          </div>
+      {(() => {
+        const shown = targetSentence ?? FIRST_SENTENCE;
+        const isLocal = !targetSentence;
+        return (
+          <>
+            <div className="prompt-kicker" style={{ marginTop: 28 }}>
+              Read this aloud
+              {shown.id ? ` · #${shown.id}` : ""}
+              {shown.difficulty || shown.category ? " · " : ""}
+              <span className="prompt-meta" style={{ margin: 0 }}>
+                {shown.difficulty ? <span className="lvl">{shown.difficulty}</span> : null}
+                {shown.category ? <span>{shown.category}</span> : null}
+              </span>
+              {isLocal && <span> · local</span>}
+            </div>
+            <div className="prompt-text">&ldquo;{shown.text}&rdquo;</div>
           {pronunciation && pronunciation.recognizedText && !pronunciation.isDemo && (
             <div className="heard-line">
-              Heard as <b>&ldquo;{pronunciation.recognizedText}&rdquo;</b>
+              Scored against <b>&ldquo;{pronunciation.recognizedText}&rdquo;</b> · tumne kya bola neeche transcript me dekho
             </div>
           )}
           {(!pronunciation || !pronunciation.recognizedText || pronunciation.isDemo) && (
             <div style={{ marginBottom: 28 }} />
           )}
-        </>
-      )}
+          </>
+        );
+      })()}
 
       {connectionState === ConnectionState.Connecting && (
         <div className="agent-line">Linking you to the coach…</div>
@@ -800,7 +902,7 @@ function SessionView({
                     <button
                       className="inline-play"
                       onClick={() => handleHearWord(w.word, "normal")}
-                      disabled={agentMissing}
+                      disabled={uiBlocked}
                       title="Hear correct pronunciation"
                     >
                       ▶
@@ -808,7 +910,7 @@ function SessionView({
                     <button
                       className="inline-play"
                       onClick={() => handleHearWord(w.word, "slow")}
-                      disabled={agentMissing}
+                      disabled={uiBlocked}
                       title="Hear it slowly"
                     >
                       🐢
@@ -960,7 +1062,7 @@ function SessionView({
       <div className="ticker-kicker" style={{ marginTop: 8 }}>
         Live transcript
         <span className="pace">
-          {summary.wpm} WPM · {summary.fillers}{" "}
+          {summary.wpm > 0 ? `${summary.wpm} WPM` : "-- WPM"} · {summary.fillers}{" "}
           {summary.fillers === 1 ? "filler" : "fillers"}
         </span>
       </div>
@@ -986,6 +1088,11 @@ function SessionView({
           Slow mode on — Play buttons play slowly
         </div>
       )}
+      {rpcError && (
+        <div className="latency-line" style={{ marginBottom: 12 }}>
+          {rpcError}
+        </div>
+      )}
 
       <div className="deck">
         <div className="deck-inner">
@@ -1002,6 +1109,7 @@ function SessionView({
               className="deck-btn"
               onClick={handleToggleMute}
               title={micMuted ? "Unmute microphone" : "Mute microphone"}
+              disabled={uiBlocked}
             >
               {micMuted ? "Unmute" : "Mute"}
             </button>
@@ -1010,10 +1118,11 @@ function SessionView({
               className={`deck-btn toggle-btn ${slowMode ? "active" : ""}`}
               onClick={() => setSlowMode((v) => !v)}
               title={slowMode ? "Slow mode ON" : "Slow mode OFF"}
+              disabled={uiBlocked}
             >
               🐢 {slowMode ? "Slow" : "Normal"}
             </button>
-            <button className="deck-btn" onClick={handleRetry}>
+            <button className="deck-btn" onClick={handleRetry} disabled={uiBlocked}>
               Try again ↺
             </button>
             {/* Phase 5: Skip button (visible during coaching) */}
@@ -1021,7 +1130,7 @@ function SessionView({
               <button
                 className="deck-btn skip-btn"
                 onClick={handleSkipCorrection}
-                disabled={agentMissing}
+                disabled={uiBlocked}
               >
                 Skip ⏭
               </button>
@@ -1029,7 +1138,7 @@ function SessionView({
             <button
               className="deck-btn"
               onClick={handleNextSentence}
-              disabled={agentMissing || nextBusy}
+              disabled={nextBusy || uiBlocked}
             >
               Next
             </button>

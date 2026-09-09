@@ -54,72 +54,90 @@ async def measure_rime_latency():
     """Measure Rime TTS synthesis latency for test sentences."""
     try:
         from livekit.plugins import rime
+        from livekit.agents.utils import http_context
     except ImportError:
         print("ERROR: livekit-plugins-rime not installed. Run from agent venv.")
         return []
 
     results = []
 
-    # Normal speed
+    # Mirror prod exactly: normal uses websocket, slow uses HTTP one-shot
     tts_normal = rime.TTS(
         model="coda",
         speaker="celeste",
+        lang="eng",
         speed_alpha=1.0,
-        use_websocket=False,
+        use_websocket=True,
     )
 
     # Slow speed
     tts_slow = rime.TTS(
         model="coda",
         speaker="celeste",
+        lang="eng",
         time_scale_factor=1.5,
         use_websocket=False,
     )
 
-    for sentence in TEST_SENTENCES:
-        text = sentence["text"]
-        variant = sentence["variant"]
+    try:
+        async with http_context.open():
+            for sentence in TEST_SENTENCES:
+                text = sentence["text"]
+                variant = sentence["variant"]
 
-        for label, tts in [("normal", tts_normal), ("slow", tts_slow)]:
-            t0 = time.perf_counter()
-            first_byte_t = None
-            total_bytes = 0
-            chunk_count = 0
+                for label, tts in [("normal", tts_normal), ("slow", tts_slow)]:
+                    t0 = time.perf_counter()
+                    first_byte_t = None
+                    total_bytes = 0
+                    chunk_count = 0
 
-            try:
-                async for chunk in tts.synthesize(text):
-                    if first_byte_t is None:
-                        first_byte_t = time.perf_counter()
-                    total_bytes += len(chunk.frame.data)
-                    chunk_count += 1
-            except Exception as e:
-                print(f"  ERROR: {e}")
-                results.append({
-                    "sentence_id": sentence["id"],
-                    "variant": variant,
-                    "speed": label,
-                    "error": str(e),
-                })
-                continue
+                    try:
+                        async for chunk in tts.synthesize(text):
+                            if first_byte_t is None:
+                                first_byte_t = time.perf_counter()
+                            total_bytes += len(chunk.frame.data)
+                            chunk_count += 1
+                    except Exception as e:
+                        print(f"  ERROR: {e}")
+                        results.append({
+                            "sentence_id": sentence["id"],
+                            "variant": variant,
+                            "speed": label,
+                            "error": str(e),
+                            "first_byte_ms": None,
+                        })
+                        continue
 
-            t_end = time.perf_counter()
-            first_byte_ms = ((first_byte_t - t0) * 1000) if first_byte_t else 0
-            total_ms = (t_end - t0) * 1000
+                    t_end = time.perf_counter()
+                    if first_byte_t is None or total_bytes == 0:
+                        print(f"  [{variant}/{label}] FAILED: no audio bytes")
+                        results.append({
+                            "sentence_id": sentence["id"],
+                            "variant": variant,
+                            "speed": label,
+                            "error": "no_audio_bytes",
+                            "first_byte_ms": None,
+                        })
+                        continue
+                    first_byte_ms = (first_byte_t - t0) * 1000
+                    total_ms = (t_end - t0) * 1000
 
-            results.append({
-                "sentence_id": sentence["id"],
-                "variant": variant,
-                "speed": label,
-                "first_byte_ms": round(first_byte_ms, 1),
-                "total_synthesis_ms": round(total_ms, 1),
-                "audio_bytes": total_bytes,
-                "chunks": chunk_count,
-            })
+                    results.append({
+                        "sentence_id": sentence["id"],
+                        "variant": variant,
+                        "speed": label,
+                        "first_byte_ms": round(first_byte_ms, 1),
+                        "total_synthesis_ms": round(total_ms, 1),
+                        "audio_bytes": total_bytes,
+                        "chunks": chunk_count,
+                    })
 
-            print(
-                f"  [{variant}/{label}] first_byte={first_byte_ms:.0f}ms "
-                f"total={total_ms:.0f}ms bytes={total_bytes} chunks={chunk_count}"
-            )
+                    print(
+                        f"  [{variant}/{label}] first_byte={first_byte_ms:.0f}ms "
+                        f"total={total_ms:.0f}ms bytes={total_bytes} chunks={chunk_count}"
+                    )
+    except Exception as e:
+        print(f"  ERROR opening http context: {e}")
 
     return results
 

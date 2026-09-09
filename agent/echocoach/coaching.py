@@ -44,14 +44,11 @@ _ENCOURAGEMENTS = [
     "Nice try!",
 ]
 
-_ENCOURAGEMENT_IDX = 0
-
 
 def _next_encouragement() -> str:
-    global _ENCOURAGEMENT_IDX
-    e = _ENCOURAGEMENTS[_ENCOURAGEMENT_IDX % len(_ENCOURAGEMENTS)]
-    _ENCOURAGEMENT_IDX += 1
-    return e
+    import random
+
+    return random.choice(_ENCOURAGEMENTS)
 
 
 def _generate_rules_correction(
@@ -61,7 +58,8 @@ def _generate_rules_correction(
     """Fast, deterministic coaching — no API call needed."""
     t0 = time.perf_counter()
 
-    words = [w["word"] for w in flagged_words[:3]]  # Limit to top 3
+    words = [str(w.get("word", "")).strip() for w in flagged_words[:3] if isinstance(w, dict)]
+    words = [w for w in words if w]  # Drop empties to avoid KeyError on bad input
     if not words:
         return CorrectionPlan(
             coaching_text="Great job! Your pronunciation sounds good.",

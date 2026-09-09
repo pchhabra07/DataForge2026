@@ -24,7 +24,8 @@ cd DataForge2026
 
 # 2. Create .env.local from the example (fill in your keys)
 cp .env.example .env.local
-cp .env.local web/.env.local   # Next.js needs its own copy
+# Web needs only LiveKit vars in web/.env.local - never copy Rime or Deepgram keys there
+# Copy these 3 lines manually: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
 
 # 3. Start the Python agent
 cd agent

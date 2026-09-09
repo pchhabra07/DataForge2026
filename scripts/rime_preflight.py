@@ -119,7 +119,7 @@ def preflight_rime_http() -> bool:
         return False
 
 
-def preflight_speed_alpha() -> bool:
+def preflight_slow() -> bool:
     """Test timeScaleFactor > 1.0 for slowed coaching delivery."""
     import urllib.request
     import json
@@ -179,8 +179,10 @@ def main() -> int:
         return 1
 
     ok = preflight_rime_http()
+    slow_ok = True
     if ok:
-        preflight_speed_alpha()
+        slow_ok = preflight_slow()
+        ok = ok and slow_ok
 
     print()
     if ok:

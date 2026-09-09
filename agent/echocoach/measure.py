@@ -34,8 +34,12 @@ class SessionMetrics:
     session_start: float = field(default_factory=time.perf_counter)
 
     def record(self, sample: MetricsSample) -> None:
-        """Record a pipeline measurement."""
+        """Record a pipeline measurement (capped to avoid unbounded growth)."""
         self.samples.append(sample)
+        if len(self.samples) > 1000:
+            self.samples = self.samples[-1000:]
+        if len(self.interruption_samples) > 200:
+            self.interruption_samples = self.interruption_samples[-200:]
 
     def record_interruption(self, stop_ms: float) -> None:
         """Record an interruption stop time."""
@@ -47,17 +51,17 @@ class SessionMetrics:
 
     @property
     def avg_assessment_ms(self) -> float:
-        vals = [s.assessment_ms for s in self.samples if s.assessment_ms > 0]
+        vals = [s.assessment_ms for s in self.samples]
         return sum(vals) / len(vals) if vals else 0.0
 
     @property
     def avg_correction_ms(self) -> float:
-        vals = [s.correction_ms for s in self.samples if s.correction_ms > 0]
+        vals = [s.correction_ms for s in self.samples if s.correction_source != "none"]
         return sum(vals) / len(vals) if vals else 0.0
 
     @property
     def avg_total_pipeline_ms(self) -> float:
-        vals = [s.total_pipeline_ms for s in self.samples if s.total_pipeline_ms > 0]
+        vals = [s.total_pipeline_ms for s in self.samples]
         return sum(vals) / len(vals) if vals else 0.0
 
     @property

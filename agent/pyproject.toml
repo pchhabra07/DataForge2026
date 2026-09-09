@@ -10,6 +10,9 @@ dependencies = [
     "livekit-plugins-silero>=0.7",
     "python-dotenv>=1.0",
     "pronounce-assess>=0.1",
+    "numpy>=1.24",
+    "huggingface-hub>=0.20",
+    "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]

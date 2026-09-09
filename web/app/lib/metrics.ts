@@ -86,14 +86,14 @@ export function summarize(lines: TranscriptLine[]): { words: number; fillers: nu
     return { words, fillers, wpm: 0 };
   }
   const elapsed = span[span.length - 1].receivedAt - span[0].receivedAt;
-  if (elapsed <= 0) {
+  if (elapsed < 2000) {
     return { words, fillers, wpm: 0 };
   }
   let spanWords = 0;
   for (const line of span) {
     spanWords += countWords(line.text);
   }
-  return { words, fillers, wpm: computeWpm(spanWords, elapsed) };
+  return { words, fillers, wpm: Math.min(computeWpm(spanWords, elapsed), 300) };
 }
 
 // ---------------------------------------------------------------------------
