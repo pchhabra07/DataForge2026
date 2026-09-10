@@ -47,6 +47,11 @@ for noisy in ("numba", "opentelemetry", "livekit.agents"):
 
 # ---------------------------------------------------------------------------
 # Rime configuration — locked from PRD §8
+# NOTE: LiveKit Rime plugin uses 3-letter code "eng".
+# Direct Rime HTTP API uses 2-letter code "en". Both refer to US English.
+# Normal path uses WebSocket streaming for low latency.
+# Slow path uses HTTP one-shot because time_scale_factor is HTTP-only.
+# speed_alpha is the only speed control supported over WebSocket.
 # ---------------------------------------------------------------------------
 RIME_MODEL = "coda"
 RIME_VOICE = "celeste"
@@ -147,9 +152,16 @@ async def echocoach_session(ctx: agents.JobContext):
         return frames
 
     async def _play_slow_frames(text: str, frames: list[rtc.AudioFrame]):
+        # Pace frames in realtime to avoid buffer underrun stutter.
+        # Each frame is ~10-20ms, so yield with a tiny sleep.
         async def _play():
             for f in frames:
                 yield f
+                try:
+                    frame_ms = 1000.0 * f.samples_per_channel / max(f.sample_rate, 1)
+                    await asyncio.sleep(min(max(frame_ms / 1000.0 * 0.9, 0.005), 0.05))
+                except Exception:
+                    await asyncio.sleep(0.01)
 
         await session.say(text, audio=_play())
 
@@ -238,6 +250,8 @@ async def echocoach_session(ctx: agents.JobContext):
         """Speak text via Rime, but bail if generation has been superseded.
 
         Returns True if the speech completed, False if fenced out.
+        Retries once on transient Rime WS failure so a single
+        network blip does not cut the voice abruptly.
         """
         nonlocal speaking_active
         if gen != correction_gen:
@@ -245,7 +259,16 @@ async def echocoach_session(ctx: agents.JobContext):
             return False
         speaking_active = True
         try:
-            await session.say(text)
+            try:
+                await session.say(text)
+            except Exception:
+                logger.warning("session.say failed, retrying once", exc_info=True)
+                if gen != correction_gen:
+                    return False
+                await asyncio.sleep(0.3)
+                if gen != correction_gen:
+                    return False
+                await session.say(text)
         finally:
             if gen == correction_gen:
                 speaking_active = False
@@ -256,12 +279,21 @@ async def echocoach_session(ctx: agents.JobContext):
         if gen != correction_gen:
             logger.debug("Fenced out slow say() for gen %d (current=%d)", gen, correction_gen)
             return False
-        frames = await fetch_slow_frames(text)
+        nonlocal speaking_active
+        # Mark speaking during fetch too so echo guard stays correct
+        # while the slow HTTP synthesis is in flight.
+        speaking_active = True
+        try:
+            frames = await fetch_slow_frames(text)
+        except Exception:
+            if gen == correction_gen:
+                speaking_active = False
+            raise
         if gen != correction_gen:
             logger.debug("Fenced out slow playback for gen %d (current=%d)", gen, correction_gen)
+            # Do not touch speaking_active here. The newer generation
+            # owns the flag now and interrupt_coaching clears it.
             return False
-        nonlocal speaking_active
-        speaking_active = True
         try:
             await _play_slow_frames(text, frames)
         finally:
@@ -272,9 +304,15 @@ async def echocoach_session(ctx: agents.JobContext):
     # --- Phase 5: Interrupt helper ---
     async def interrupt_coaching(source: str = "unknown"):
         """Stop current coaching output and fence stale corrections."""
-        nonlocal correction_gen
+        nonlocal correction_gen, speaking_active
         was_speaking = speaking_active
         correction_gen += 1
+        # Clear the flag immediately so future turns are not marked
+        # as echo. Without this, a barge-in during session.say leaves
+        # speaking_active True forever because the fenced say finally
+        # block skips the reset on gen mismatch. That stuck flag was
+        # discarding every later turn as echo.
+        speaking_active = False
         logger.info(
             "Interrupting coaching (source=%s, new_gen=%d, was_speaking=%s)",
             source,
@@ -305,27 +343,9 @@ async def echocoach_session(ctx: agents.JobContext):
 
         await send_to_client("state", {"state": "listening"})
 
-    # --- Send initial target sentence ---
-    await send_to_client(
-        "sentence",
-        {
-            "id": current_sentence.id,
-            "text": current_sentence.text,
-            "difficulty": current_sentence.difficulty,
-            "category": current_sentence.category,
-        },
-    )
-
-    # --- Speak greeting with target sentence (fenced, user can barge in) ---
-    greeting = (
-        f"Welcome to EchoCoach! Let's practice your pronunciation. "
-        f"Please read this sentence aloud: {current_sentence.text}"
-    )
-    t_speak = time.perf_counter()
-    correction_gen += 1
-    greet_ok = await say_fenced(greeting, correction_gen)
-    t_done = time.perf_counter()
-    logger.info(f"Rime greeting latency: {(t_done - t_speak) * 1000:.0f}ms (completed={greet_ok})")
+    # NOTE: initial sentence + greeting are sent after the scoring model
+    # is ready, so Rime audio only plays once the model popup disappears.
+    # See _send_initial_and_greet below, started after capture loop.
 
     # --- Audio capture buffer ---
     # One utterance is assessed and coached at a time so slow speech
@@ -524,27 +544,26 @@ async def echocoach_session(ctx: agents.JobContext):
             await send_to_client("coaching", correction_data)
 
             # Speak the coaching feedback via Rime (normal speed), fenced
+            # Latency fix: single TTS call for the whole correction.
+            # Your logs showed 18594ms for 3-4 sequential Rime calls.
+            # One call means one 5-6s synthesis instead of 18s chained.
+            # Slow playback is on demand via Play Slow buttons only.
+            # Full word list stays on screen for click-to-play.
             t_correction_start = time.perf_counter()
-            if not await say_fenced(correction.coaching_text, my_gen):
-                logger.info("Coaching speech interrupted at coaching_text")
+            # Speak every flagged word. Still a single TTS call so adding
+            # the third word only lengthens the text, not the call count.
+            auto_words = correction.words_to_model
+            if auto_words:
+                combined_text = (
+                    f"{correction.coaching_text} "
+                    f"Listen: {'. '.join(auto_words)}. "
+                    f"Now try reading the sentence again!"
+                )
+            else:
+                combined_text = correction.coaching_text
+            if not await say_fenced(combined_text, my_gen):
+                logger.info("Coaching speech interrupted")
                 return
-
-            # Speak each flagged word at normal speed, then slow — fenced
-            for word in correction.words_to_model:
-                if not await say_fenced(f"The word is: {word}", my_gen):
-                    logger.info("Coaching speech interrupted at word '%s'", word)
-                    return
-                await asyncio.sleep(0.3)  # Brief pause
-                if my_gen != correction_gen:
-                    logger.info("Coaching fenced during pause at word '%s'", word)
-                    return
-                if not await say_slow_fenced(f"Now slowly: {word}", my_gen):
-                    logger.info("Coaching slow speech interrupted at word '%s'", word)
-                    return
-                await asyncio.sleep(0.3)
-                if my_gen != correction_gen:
-                    logger.info("Coaching fenced during pause at word '%s'", word)
-                    return
 
             t_correction_end = time.perf_counter()
             correction_ms = (t_correction_end - t_correction_start) * 1000
@@ -569,7 +588,6 @@ async def echocoach_session(ctx: agents.JobContext):
             # Send enriched metrics to client
             if my_gen == correction_gen:
                 await send_to_client("metrics", session_metrics.latest_dict())
-                await say_fenced("Now try reading the sentence again!", my_gen)
         else:
             # No issues — encourage and move on
             sample = MetricsSample(
@@ -610,8 +628,8 @@ async def echocoach_session(ctx: agents.JobContext):
                         turn_tainted = False
                         last_speaking_seen = 0.0
                         ECHO_TAIL_S = 1.5
-                        MIN_VOICED_MS = 350.0
-                        SILENCE_MS = 800.0
+                        MIN_VOICED_MS = 300.0
+                        SILENCE_MS = 500.0
                         SPEECH_THRESHOLD = 300
                         _logged_frame_info = False
 
@@ -714,6 +732,49 @@ async def echocoach_session(ctx: agents.JobContext):
 
     # Start audio capture in background
     asyncio.create_task(capture_audio_loop())
+
+    # --- Gated greeting: wait for scoring model, then speak ---
+    # The web client shows the model popup until it receives
+    # model_status ready or error. We hold both the initial sentence
+    # data message and the Rime greeting until then, so audio never
+    # plays behind the popup.
+    async def _send_initial_and_greet():
+        nonlocal correction_gen
+        # Wait for warmup to finish, fail open on error or timeout
+        # so the session never stays silent forever.
+        for _ in range(360):
+            if model_ready:
+                break
+            try:
+                from echocoach.pronunciation import get_download_progress as _prog
+
+                if _prog().get("phase") == "error":
+                    logger.warning("Greeting despite model error so user hears coach")
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        else:
+            logger.warning("Model wait timed out, greeting anyway")
+        await send_to_client(
+            "sentence",
+            {
+                "id": current_sentence.id,
+                "text": current_sentence.text,
+                "difficulty": current_sentence.difficulty,
+                "category": current_sentence.category,
+            },
+        )
+        # Keep greeting short so first Rime synthesis starts fast.
+        greeting = f"Welcome. Please read aloud: {current_sentence.text}"
+        t_speak = time.perf_counter()
+        correction_gen += 1
+        greet_ok = await say_fenced(greeting, correction_gen)
+        t_done = time.perf_counter()
+        greet_ms = (t_done - t_speak) * 1000
+        logger.info(f"Rime greeting latency: {greet_ms:.0f}ms (completed={greet_ok})")
+
+    asyncio.create_task(_send_initial_and_greet())
 
 
 def _compute_energy(frame_bytes: bytes) -> float:

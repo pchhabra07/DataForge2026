@@ -103,7 +103,7 @@ Open **http://localhost:3000**, click "Start Coaching Session", and speak!
 |-----------|-------|
 | **Model** | `coda` |
 | **Speaker/Voice** | `celeste` |
-| **Language** | `en` |
+| **Language** | `eng` in LiveKit plugin, `en` in direct HTTP preflight, both US English |
 | **Audio format** | Streamed PCM/L16 |
 | **Transport** | LiveKit (WebRTC) |
 | **Normal speed** | `speed_alpha = 1.0` |
@@ -155,7 +155,6 @@ Rime is the **primary spoken output**. Every correction is spoken by Rime. Remov
 | Rime API down | Agent fails to speak; error logged; client shows "Agent not connected" |
 | Deepgram API down | No transcription; pronunciation assessment still runs on raw audio |
 | Pronunciation model fails to load | Falls back to mock assessment for UI testing |
-| LLM timeout (>2s) | Falls back to rules-based coaching (instant) |
 | User barge-in during correction | Audio stops ≤300ms; stale corrections fenced out |
 | Very short utterance (<100ms) | Silently dropped, no assessment attempted |
 
@@ -168,7 +167,7 @@ DataForge2026/
 ├── agent/                  # Python LiveKit agent
 │   ├── echocoach/
 │   │   ├── main.py         # Agent entry point, session handler
-│   │   ├── coaching.py     # LLM + rules coaching logic
+│   │   ├── coaching.py     # Offline rules coaching logic
 │   │   ├── pronunciation.py # On-device wav2vec2 scoring
 │   │   ├── measure.py      # Session metrics accumulator
 │   │   └── sentences.py    # Target sentence bank

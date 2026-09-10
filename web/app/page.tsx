@@ -312,7 +312,7 @@ export default function Home() {
           <LiveKitRoom
             serverUrl={connectionDetails.url}
             token={connectionDetails.token}
-            audio={true}
+            audio={false}
             video={false}
             connectOptions={{ autoSubscribe: true }}
             onDisconnected={handleDisconnect}
@@ -382,8 +382,11 @@ function SessionView({
   });
 
   // --- Transcript state ---
+  // transcriptEpoch bumps on every Next so old lines vanish instantly.
   const [fallbackLines, setFallbackLines] = useState<TranscriptLine[]>([]);
-  const primaryLines = useMemo(() => {
+  const [transcriptEpoch, setTranscriptEpoch] = useState(0);
+  const epochByIdRef = useRef<Map<string, number>>(new Map());
+  const primaryRaw = useMemo(() => {
     let acc: TranscriptLine[] = [];
     for (const entry of transcriptions) {
       acc = upsertLine(acc, {
@@ -396,8 +399,26 @@ function SessionView({
     }
     return acc;
   }, [transcriptions]);
-  const usePrimary = primaryLines.length > 0;
-  const lines = usePrimary ? primaryLines.slice(-50) : fallbackLines;
+  // Epoch tagging lives in an effect since refs cannot be touched
+  // during render. The hook buffer cannot be cleared, so we filter
+  // to the current epoch here and Next clears the ticker instantly.
+  const [visiblePrimary, setVisiblePrimary] = useState<TranscriptLine[]>([]);
+  useEffect(() => {
+    const epochById = epochByIdRef.current;
+    for (const line of primaryRaw) {
+      if (!epochById.has(line.id)) epochById.set(line.id, transcriptEpoch);
+    }
+    // Prune ids that left the hook buffer so the map stays small.
+    const live = new Set(primaryRaw.map((l) => l.id));
+    for (const key of Array.from(epochById.keys())) {
+      if (!live.has(key)) epochById.delete(key);
+    }
+    setVisiblePrimary(
+      primaryRaw.filter((l) => (epochById.get(l.id) ?? 0) >= transcriptEpoch),
+    );
+  }, [primaryRaw, transcriptEpoch]);
+  const usePrimary = primaryRaw.length > 0;
+  const lines = usePrimary ? visiblePrimary.slice(-50) : fallbackLines;
   const summary = useMemo(() => summarize(lines), [lines]);
 
   // --- Phase 3+4 state ---
@@ -418,7 +439,8 @@ function SessionView({
   const [slowMode, setSlowMode] = useState(false);
 
   const [modelStatus, setModelStatus] = useState<string | null>(null);
-  const [micMuted, setMicMuted] = useState(false);
+  // Start muted so background noise never barges in. User unmutes to speak.
+  const [micMuted, setMicMuted] = useState(true);
 
   const [sessionStart, setSessionStart] = useState<number | null>(() => null);
   const [sessionElapsed, setSessionElapsed] = useState(0);
@@ -650,6 +672,17 @@ function SessionView({
   // --- RPC: Request next sentence ---
   const handleNextSentence = useCallback(async () => {
     if (nextBusy) return;
+    // Clear report plus transcript optimistically BEFORE the RPC round
+    // trip so stale results never linger on screen.
+    const clearForNext = () => {
+      setPronunciation(null);
+      setCoaching(null);
+      setPipelineMetrics(null);
+      setFallbackLines([]);
+      setTranscriptEpoch((e) => e + 1);
+      setSessionState("listening");
+      setRpcError(null);
+    };
     const fallbackNext = () => {
       const base = targetSentence ?? FIRST_SENTENCE;
       const idx = SENTENCES.findIndex((s) => s.id === base.id);
@@ -660,10 +693,7 @@ function SessionView({
         difficulty: next.difficulty,
         category: next.category,
       });
-      setPronunciation(null);
-      setCoaching(null);
-      setPipelineMetrics(null);
-      setSessionState("listening");
+      clearForNext();
     };
     try {
       const agent = agentParticipant;
@@ -673,16 +703,12 @@ function SessionView({
         return;
       }
       setNextBusy(true);
+      clearForNext();
       await room.localParticipant.performRpc({
         destinationIdentity: agent.identity,
         method: "next_sentence",
         payload: "",
       });
-      setPronunciation(null);
-      setCoaching(null);
-      setPipelineMetrics(null);
-      setSessionState("listening");
-      setRpcError(null);
     } catch (e) {
       console.error("next_sentence RPC failed:", e);
       fallbackNext();
@@ -701,6 +727,22 @@ function SessionView({
 
   const { localParticipant } = useLocalParticipant();
 
+  // Enforce start-muted on join so background noise never interrupts.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await localParticipant.setMicrophoneEnabled(false);
+        if (!cancelled) setMicMuted(true);
+      } catch {
+        // ignore, user can toggle manually
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [localParticipant]);
+
   const handleToggleMute = useCallback(async () => {
     try {
       const next = !micMuted;
@@ -710,6 +752,24 @@ function SessionView({
       console.error("Mic toggle failed:", e);
     }
   }, [localParticipant, micMuted]);
+
+  // Auto-mute when assessment or coaching starts so background noise
+  // never cuts the coach voice. Fires only on entry into those states.
+  // User can still tap unmute to barge in, or press Skip.
+  const autoMutedRef = useRef(false);
+  useEffect(() => {
+    if (sessionState === "assessing" || sessionState === "coaching") {
+      if (!micMuted && !autoMutedRef.current) {
+        autoMutedRef.current = true;
+        localParticipant.setMicrophoneEnabled(false).then(
+          () => setMicMuted(true),
+          (e: unknown) => console.error("Auto-mute failed:", e),
+        );
+      }
+    } else if (sessionState === "listening") {
+      autoMutedRef.current = false;
+    }
+  }, [sessionState, micMuted, localParticipant]);
   // --- RPC: Hear a word ---
   const handleHearWord = useCallback(
     async (word: string, speed: "normal" | "slow") => {
@@ -757,8 +817,10 @@ function SessionView({
   const uiBlocked = agentMissing || !modelReady;
   const stateInfo = STATE_LABELS[sessionState] || STATE_LABELS.idle;
   const deckStatus =
-    micMuted
-      ? "Mic muted — unmute to speak"
+    micMuted && (sessionState === "coaching" || sessionState === "assessing")
+      ? "Coach speaking — mic auto-muted, unmute to interrupt"
+      : micMuted
+        ? "Mic muted — unmute to speak"
       : connectionState !== ConnectionState.Connected
         ? "Connecting microphone…"
         : sessionState === "listening"
@@ -796,7 +858,7 @@ function SessionView({
           ? "Waiting for coach to join..."
           : isError
             ? "Scoring model failed to load - check agent terminal"
-            : "Model download ho raha hai. Thoda wait karo.";
+            : "Downloading scoring model. Please wait a moment.";
         return (
           <div className="modal-overlay fade-in" role="dialog" aria-modal="true">
             <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -805,7 +867,7 @@ function SessionView({
               <p className="modal-hint">
                 {agentMissing
                   ? "Start the agent with python -m echocoach.main dev then rejoin."
-                  : "Live percent terminal me dikhega. Ready hote hi ye hat jayega."}
+                  : "Live progress appears in the agent terminal. This message will disappear once ready."}
               </p>
             </div>
           </div>
@@ -841,7 +903,7 @@ function SessionView({
             <div className="prompt-text">&ldquo;{shown.text}&rdquo;</div>
           {pronunciation && pronunciation.recognizedText && !pronunciation.isDemo && (
             <div className="heard-line">
-              Scored against <b>&ldquo;{pronunciation.recognizedText}&rdquo;</b> · tumne kya bola neeche transcript me dekho
+              Scored against <b>&ldquo;{pronunciation.recognizedText}&rdquo;</b> · see the live transcript below for what you said
             </div>
           )}
           {(!pronunciation || !pronunciation.recognizedText || pronunciation.isDemo) && (
@@ -1069,20 +1131,36 @@ function SessionView({
         <div className="deck-inner">
           <div
             className={`orb ${
-              connectionState === ConnectionState.Connected ? "live" : ""
-            }`}
+              connectionState === ConnectionState.Connected && !micMuted ? "live" : ""
+            } ${micMuted ? "muted" : ""}`}
           >
             <i />
           </div>
           <div className="deck-status">{deckStatus}</div>
           <div className="deck-actions">
             <button
-              className="deck-btn"
+              className={`deck-btn mic-btn ${micMuted ? "muted" : ""}`}
               onClick={handleToggleMute}
               title={micMuted ? "Unmute microphone" : "Mute microphone"}
-              disabled={uiBlocked}
+              aria-label={micMuted ? "Unmute microphone" : "Mute microphone"}
+              aria-pressed={!micMuted}
             >
-              {micMuted ? "Unmute" : "Mute"}
+              {micMuted ? (
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <line x1="1" y1="1" x2="23" y2="23" />
+                  <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V5a3 3 0 0 0-5.94-.6" />
+                  <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </svg>
+              ) : (
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </svg>
+              )}
             </button>
             {/* Phase 6: Slow-mode toggle */}
             <button

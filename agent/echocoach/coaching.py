@@ -36,30 +36,63 @@ class CorrectionPlan:
 # Rules engine (instant, no API call)
 # ---------------------------------------------------------------------------
 
-_ENCOURAGEMENTS = [
+# Openers rotate per severity so repeated attempts never read identical.
+_SEVERE_OPENERS = [
+    "That one needs real work.",
+    "Let's rebuild those sounds.",
+    "Time to slow down and fix this.",
+]
+
+_MODERATE_OPENERS = [
     "Almost there!",
     "Good effort!",
-    "Let's polish that up!",
     "You're getting closer!",
+]
+
+_LIGHT_OPENERS = [
     "Nice try!",
+    "Nearly perfect!",
+    "Just a small polish needed.",
 ]
 
 
-def _next_encouragement() -> str:
-    import random
-
-    return random.choice(_ENCOURAGEMENTS)
+def _pick_opener(pool: list[str], key: str) -> str:
+    """Deterministic pick from a pool so the same words give variety
+    across attempts without pure randomness repeating."""
+    if not key:
+        return pool[0]
+    h = 0
+    for ch in key:
+        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    return pool[h % len(pool)]
 
 
 def _generate_rules_correction(
     flagged_words: list[dict],
     reference_text: str,
 ) -> CorrectionPlan:
-    """Fast, deterministic coaching — no API call needed."""
+    """Fast, deterministic coaching — no API call needed.
+
+    The note varies with severity so every attempt reads different:
+    average flagged score under 40 is severe, under 60 moderate,
+    anything above is a light touch-up. The opener pool plus the
+    score number plus the word list all change with the attempt.
+    """
     t0 = time.perf_counter()
 
-    words = [str(w.get("word", "")).strip() for w in flagged_words[:3] if isinstance(w, dict)]
-    words = [w for w in words if w]  # Drop empties to avoid KeyError on bad input
+    scored = []
+    for w in flagged_words[:3]:
+        if not isinstance(w, dict):
+            continue
+        word = str(w.get("word", "")).strip()
+        if not word:
+            continue
+        try:
+            score = float(w.get("accuracyScore", 0) or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        scored.append((word, score))
+    words = [w for w, _ in scored]
     if not words:
         return CorrectionPlan(
             coaching_text="Great job! Your pronunciation sounds good.",
@@ -68,22 +101,33 @@ def _generate_rules_correction(
             source="rules",
         )
 
-    encouragement = _next_encouragement()
+    avg = sum(s for _, s in scored) / max(len(scored), 1)
+    worst_word, worst_score = min(scored, key=lambda p: p[1])
+    key = "|".join(words)
+
+    if avg < 40:
+        opener = _pick_opener(_SEVERE_OPENERS, key)
+    elif avg < 60:
+        opener = _pick_opener(_MODERATE_OPENERS, key)
+    else:
+        opener = _pick_opener(_LIGHT_OPENERS, key)
 
     if len(words) == 1:
         coaching_text = (
-            f"{encouragement} Let's work on the word '{words[0]}'. "
-            f"Listen carefully and try to match it."
+            f"{opener} The word '{words[0]}' came out at {worst_score:.0f}. "
+            f"Listen carefully and shape each sound, then repeat it back."
         )
     elif len(words) == 2:
         coaching_text = (
-            f"{encouragement} Let's focus on '{words[0]}' and '{words[1]}'. "
-            f"I'll say each one clearly for you."
+            f"{opener} Two words need work, averaging {avg:.0f}. "
+            f"'{words[0]}' and '{words[1]}'. "
+            f"I'll say each one clearly, starting with the weakest."
         )
     else:
         word_list = ", ".join(f"'{w}'" for w in words[:-1]) + f", and '{words[-1]}'"
         coaching_text = (
-            f"{encouragement} I noticed a few words that need attention: {word_list}. "
+            f"{opener} {len(words)} words need attention, averaging {avg:.0f}: "
+            f"{word_list}. '{worst_word}' is the weakest at {worst_score:.0f}. "
             f"Let me model them for you."
         )
 

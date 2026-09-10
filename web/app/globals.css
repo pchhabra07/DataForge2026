@@ -749,6 +749,30 @@ body::before {
   color: var(--ember);
 }
 
+/* Mic icon button: round, icon only. Muted state is dim with slash icon. */
+.mic-btn {
+  padding: 9px 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+}
+
+.mic-btn.muted {
+  opacity: 0.55;
+  border-style: dashed;
+}
+
+/* Orb stays idle while muted so it never pulses on background noise. */
+.orb.muted i {
+  background: var(--ink-faint);
+  box-shadow: none;
+}
+
+.orb.muted::after {
+  display: none;
+}
+
 /* Footer strip */
 .colophon {
   padding: 10px 28px 90px;
