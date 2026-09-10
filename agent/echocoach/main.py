@@ -593,8 +593,8 @@ async def echocoach_session(ctx: agents.JobContext):
         # Wait for a remote participant with an audio track
         while True:
             participants = ctx.room.remote_participants
-            for p in participants.values():
-                for pub in p.track_publications.values():
+            for p in list(participants.values()):
+                for pub in list(p.track_publications.values()):
                     if pub.track and pub.track.kind == rtc.TrackKind.KIND_AUDIO:
                         logger.info("Found audio track from participant %s", p.identity)
                         audio_track = pub.track
