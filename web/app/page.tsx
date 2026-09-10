@@ -147,13 +147,17 @@ export default function Home() {
     useState<TokenResponse | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showExample, setShowExample] = useState(() => {
+  const [showExample, setShowExample] = useState(false);
+
+  useEffect(() => {
     try {
-      return typeof window === "undefined" ? true : localStorage.getItem("ec-seen") !== "1";
+      if (localStorage.getItem("ec-seen") !== "1") {
+        setShowExample(true);
+      }
     } catch {
-      return true;
+      // ignore storage errors
     }
-  });
+  }, []);
 
   const dismissExample = useCallback(() => {
     setShowExample(false);
@@ -633,18 +637,33 @@ function SessionView({
 
   useEffect(() => {
     if (!agentParticipant) return;
-    const id = setTimeout(async () => {
-      try {
-        await room.localParticipant.performRpc({
-          destinationIdentity: agentParticipant.identity,
-          method: "get_state",
-          payload: "",
-        });
-      } catch (e) {
-        console.warn("get_state resync failed:", e);
-      }
-    }, 500);
-    return () => clearTimeout(id);
+    let cancelled = false;
+    let timer: NodeJS.Timeout;
+
+    const performSync = (delay: number, retriesLeft: number) => {
+      timer = setTimeout(async () => {
+        if (cancelled) return;
+        try {
+          await room.localParticipant.performRpc({
+            destinationIdentity: agentParticipant.identity,
+            method: "get_state",
+            payload: "",
+          });
+        } catch (e) {
+          if (retriesLeft > 0 && !cancelled) {
+            performSync(800, retriesLeft - 1);
+          } else {
+            console.warn("get_state resync failed:", e);
+          }
+        }
+      }, delay);
+    };
+
+    performSync(500, 2);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [room, agentParticipant]);
 
   // --- RPC: Request next sentence ---

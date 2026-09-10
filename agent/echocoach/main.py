@@ -316,16 +316,7 @@ async def echocoach_session(ctx: agents.JobContext):
         },
     )
 
-    # --- Speak greeting with target sentence (fenced, user can barge in) ---
-    greeting = (
-        f"Welcome to EchoCoach! Let's practice your pronunciation. "
-        f"Please read this sentence aloud: {current_sentence.text}"
-    )
-    t_speak = time.perf_counter()
-    correction_gen += 1
-    greet_ok = await say_fenced(greeting, correction_gen)
-    t_done = time.perf_counter()
-    logger.info(f"Rime greeting latency: {(t_done - t_speak) * 1000:.0f}ms (completed={greet_ok})")
+
 
     # --- Audio capture buffer ---
     # One utterance is assessed and coached at a time so slow speech
@@ -714,6 +705,17 @@ async def echocoach_session(ctx: agents.JobContext):
 
     # Start audio capture in background
     asyncio.create_task(capture_audio_loop())
+
+    # --- Speak greeting with target sentence (fenced, user can barge in) ---
+    greeting = (
+        f"Welcome to EchoCoach! Let's practice your pronunciation. "
+        f"Please read this sentence aloud: {current_sentence.text}"
+    )
+    t_speak = time.perf_counter()
+    correction_gen += 1
+    greet_ok = await say_fenced(greeting, correction_gen)
+    t_done = time.perf_counter()
+    logger.info(f"Rime greeting latency: {(t_done - t_speak) * 1000:.0f}ms (completed={greet_ok})")
 
 
 def _compute_energy(frame_bytes: bytes) -> float:
