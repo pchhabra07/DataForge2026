@@ -147,3 +147,68 @@ def test_mock_pronunciation_assessment():
     assert result.fluency_score == 84.0
     assert result.words[1].accuracy_score >= 80
 
+
+def test_phonetic_similarity():
+    from echocoach.pronunciation import word_phonetic_similarity
+
+    # Exact matches
+    assert word_phonetic_similarity("hello", "hello") == 1.0
+    assert word_phonetic_similarity("cat", "CAT") == 1.0
+
+    # Homophones / near homophones
+    homophone_score = word_phonetic_similarity("weather", "whether")
+    assert homophone_score >= 0.9
+
+    # Distant words
+    diff_score = word_phonetic_similarity("quick", "elephant")
+    assert diff_score < 0.4
+
+
+def test_align_reference_and_recognized():
+    from echocoach.pronunciation import align_reference_and_recognized
+
+    ref = ["the", "quick", "brown", "fox"]
+    # Recognized has a filler insertion and a mispronunciation
+    hyp = [
+        {"word": "the", "confidence": 0.98},
+        {"word": "um", "confidence": 0.40},
+        {"word": "quik", "confidence": 0.90},
+        {"word": "brown", "confidence": 0.95},
+        # fox omitted
+    ]
+
+    aligned = align_reference_and_recognized(ref, hyp)
+    assert len(aligned) == 4
+    # "the" -> "the"
+    assert aligned[0][0] == "the"
+    assert aligned[0][1]["word"] == "the"
+    # "quick" -> "quik"
+    assert aligned[1][0] == "quick"
+    assert aligned[1][1]["word"] == "quik"
+    # "brown" -> "brown"
+    assert aligned[2][0] == "brown"
+    assert aligned[2][1]["word"] == "brown"
+    # "fox" -> None (omitted)
+    assert aligned[3][0] == "fox"
+    assert aligned[3][1] is None
+
+
+def test_warmup_free_assessor(monkeypatch):
+    import asyncio
+
+    from echocoach.pronunciation import get_download_progress, warmup_free_assessor
+
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "test-fake-key")
+    notifications = []
+
+    def status_callback(s):
+        notifications.append(s)
+
+    asyncio.run(warmup_free_assessor(status_callback))
+    assert "ready" in notifications
+
+    prog = get_download_progress()
+    assert prog["phase"] == "ready"
+    assert prog["downloaded"] == 1
+
+

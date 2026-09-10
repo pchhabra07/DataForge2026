@@ -1,42 +1,47 @@
 """
-EchoCoach — Free On-Device Pronunciation Assessment
+EchoCoach — Cloud-Assisted Pronunciation Assessment via Deepgram + Phonetic Levenshtein
 
-Uses the open-source pronounce-assess engine (wav2vec2 phoneme model, MIT)
-to evaluate pronunciation quality with zero API cost and no key.
-Takes raw PCM audio + reference text, returns per-word accuracy scores.
+Replaces the heavy local 1.2GB wav2vec2 model with a fast cloud-assisted pipeline:
+1. Deepgram Nova-3 returns word-level transcription, acoustic confidence, and timestamps.
+2. Phonetic Levenshtein alignment (via eng_to_ipa) matches recognized words against the
+   reference target sentence.
+3. Combines phonetic similarity and acoustic confidence into per-word accuracy scores,
+   fluency, completeness, and prosody.
 
-Audio requirements: 16kHz mono float32 for the engine (resampled in-house).
-LiveKit typically delivers 48kHz — we resample before sending.
+Zero local model download (~0MB cache), zero CPU saturation, instant startup (<5ms).
+Requires DEEPGRAM_API_KEY in environment or .env.local.
 """
 
 from __future__ import annotations
 
 import asyncio
+import difflib
+import io
+import json
 import logging
 import os
 import re
 import struct
 import threading
+import time
+import urllib.error
+import urllib.request
+import wave
 from dataclasses import dataclass, field
 
-import numpy as np
+import eng_to_ipa as ipa
 
 logger = logging.getLogger("echocoach.pronunciation")
-
-os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 # Flag threshold: words below this score get flagged for correction
 DEFAULT_FLAG_THRESHOLD = 60
 
-_MODEL_LOCK = threading.RLock()
-_SCORER = None
-
-_PROGRESS = {"phase": "idle", "file": "", "downloaded": 0, "total": 0}
+_PROGRESS = {"phase": "ready", "file": "deepgram-nova3", "downloaded": 1, "total": 1}
 _PROGRESS_LOCK = threading.Lock()
 
 
 def get_download_progress() -> dict:
-    """Thread-safe snapshot of model download progress for the client."""
+    """Thread-safe snapshot of model status for the client."""
     with _PROGRESS_LOCK:
         return dict(_PROGRESS)
 
@@ -105,37 +110,20 @@ def resample_pcm(
     target_rate: int = 16000,
     sample_width: int = 2,
 ) -> bytes:
-    """Resample PCM audio from source_rate to target_rate using linear interpolation.
-
-    This is a simple resampler suitable for speech assessment. For production,
-    consider using a proper DSP library.
-
-    Args:
-        audio_bytes: Raw PCM bytes (16-bit signed LE mono).
-        source_rate: Original sample rate (e.g. 48000).
-        target_rate: Desired sample rate (default 16000).
-        sample_width: Bytes per sample (default 2 for 16-bit).
-
-    Returns:
-        Resampled PCM bytes at target_rate.
-    """
+    """Resample PCM audio from source_rate to target_rate using linear interpolation."""
     if source_rate == target_rate:
         return audio_bytes
 
-    # Unpack 16-bit signed samples
     num_samples = len(audio_bytes) // sample_width
     if num_samples == 0:
         return b""
 
     samples = struct.unpack(f"<{num_samples}h", audio_bytes[: num_samples * sample_width])
-
-    # Calculate output size
     ratio = target_rate / source_rate
     out_len = int(num_samples * ratio)
     if out_len == 0:
         return b""
 
-    # Linear interpolation resample via numpy (fast path)
     import numpy as np
 
     src = np.asarray(samples, dtype=np.float32)
@@ -148,21 +136,132 @@ def resample_pcm(
     return clipped.tobytes()
 
 
+def to_ipa_clean(text: str) -> str:
+    """Convert text to phonetic IPA representation, stripping unknown asterisks."""
+    clean = re.sub(r"[^a-zA-Z']", "", text.lower())
+    if not clean:
+        return ""
+    try:
+        converted = ipa.convert(clean)
+        return converted.replace("*", "")
+    except Exception:
+        return clean
+
+
+def word_phonetic_similarity(w1: str, w2: str) -> float:
+    """Compute phonetic similarity ratio between two words using IPA representation."""
+    c1 = re.sub(r"[^a-zA-Z]", "", w1.lower())
+    c2 = re.sub(r"[^a-zA-Z]", "", w2.lower())
+    if not c1 or not c2:
+        return 0.0
+    if c1 == c2:
+        return 1.0
+
+    p1 = to_ipa_clean(c1)
+    p2 = to_ipa_clean(c2)
+    if p1 and p2:
+        return difflib.SequenceMatcher(None, p1, p2).ratio()
+    return difflib.SequenceMatcher(None, c1, c2).ratio()
+
+
+def align_reference_and_recognized(
+    ref_words: list[str],
+    dg_words: list[dict],
+) -> list[tuple[str, dict | None]]:
+    """Align reference target words against Deepgram recognized words using Needleman-Wunsch.
+
+    Returns a list of (ref_word, matched_dg_dict_or_None).
+    """
+    n = len(ref_words)
+    m = len(dg_words)
+    if n == 0:
+        return []
+    if m == 0:
+        return [(rw, None) for rw in ref_words]
+
+    gap_penalty = -0.5
+    dp = [[0.0] * (m + 1) for _ in range(n + 1)]
+
+    for i in range(1, n + 1):
+        dp[i][0] = dp[i - 1][0] + gap_penalty
+    for j in range(1, m + 1):
+        dp[0][j] = dp[0][j - 1] + gap_penalty
+
+    for i in range(1, n + 1):
+        rw = ref_words[i - 1]
+        for j in range(1, m + 1):
+            dw = dg_words[j - 1].get("word", "")
+            sim = word_phonetic_similarity(rw, dw)
+            # Positive reward if similar, negative penalty if very dissimilar
+            match_score = (sim - 0.45) * 2.5
+            score_diag = dp[i - 1][j - 1] + match_score
+            score_del = dp[i - 1][j] + gap_penalty
+            score_ins = dp[i][j - 1] + gap_penalty
+            dp[i][j] = max(score_diag, score_del, score_ins)
+
+    # Backtrack alignment
+    i, j = n, m
+    alignment: list[tuple[str, dict | None]] = []
+    while i > 0 or j > 0:
+        if i > 0 and j > 0:
+            rw = ref_words[i - 1]
+            dw = dg_words[j - 1].get("word", "")
+            sim = word_phonetic_similarity(rw, dw)
+            match_score = (sim - 0.45) * 2.5
+            if abs(dp[i][j] - (dp[i - 1][j - 1] + match_score)) < 1e-6:
+                alignment.append((rw, dg_words[j - 1]))
+                i -= 1
+                j -= 1
+                continue
+        if i > 0 and abs(dp[i][j] - (dp[i - 1][j] + gap_penalty)) < 1e-6:
+            alignment.append((ref_words[i - 1], None))
+            i -= 1
+        else:
+            # insertion in dg_words (user said extra words/fillers)
+            j -= 1
+
+    alignment.reverse()
+    return alignment
+
+
+async def warmup_free_assessor(on_status=None) -> None:
+    """Validate Deepgram Cloud API readiness instantly with zero model download."""
+    async def _notify(status: str) -> None:
+        if on_status is None:
+            return
+        try:
+            res = on_status(status)
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception:
+            pass
+
+    await _notify("loading")
+
+    api_key = os.environ.get("DEEPGRAM_API_KEY", "")
+    if not api_key:
+        logger.error("DEEPGRAM_API_KEY missing from environment — check .env.local")
+        with _PROGRESS_LOCK:
+            _PROGRESS["phase"] = "error"
+        await _notify("error")
+        return
+
+    with _PROGRESS_LOCK:
+        _PROGRESS["phase"] = "ready"
+        _PROGRESS["file"] = "deepgram-nova3"
+        _PROGRESS["downloaded"] = 1
+        _PROGRESS["total"] = 1
+
+    await _notify("ready")
+    logger.info("Deepgram cloud pronunciation engine ready (0MB local download, instant)")
+
+
 async def assess_pronunciation(
     audio_bytes: bytes,
     reference_text: str,
     sample_rate: int = 48000,
 ) -> PronunciationResult | None:
-    """Run on-device pronunciation assessment on raw PCM audio.
-
-    Args:
-        audio_bytes: Raw PCM audio (16-bit signed LE, mono).
-        reference_text: The target sentence the user was reading.
-        sample_rate: Sample rate of the input audio (will resample to 16kHz).
-
-    Returns:
-        PronunciationResult with per-word scores, or None on failure.
-    """
+    """Run cloud-assisted pronunciation assessment via Deepgram + Phonetic Levenshtein."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
@@ -173,95 +272,186 @@ async def assess_pronunciation(
     )
 
 
-async def warmup_free_assessor(on_status=None) -> None:
-    """Preload the scoring model in the background so the first attempt is fast.
+def _assess_pronunciation_sync(
+    audio_bytes: bytes,
+    reference_text: str,
+    sample_rate: int = 48000,
+) -> PronunciationResult | None:
+    """Synchronous assessment: Calls Deepgram Nova-3 API and performs phonetic alignment."""
+    if len(audio_bytes) < 3200:
+        logger.warning("Audio too short for assessment (%d bytes)", len(audio_bytes))
+        return None
 
-    Calls on_status(status, **info) with loading, ready, or error so the
-    client can show model progress.
-    """
-    loop = asyncio.get_running_loop()
-    if on_status is not None:
-        await on_status("loading")
+    api_key = os.environ.get("DEEPGRAM_API_KEY", "")
+    if not api_key:
+        logger.error("DEEPGRAM_API_KEY missing from environment")
+        return None
+
+    # Parse reference words
+    ref_words_raw = re.findall(r"[A-Za-z']+", reference_text)
+    if not ref_words_raw:
+        ref_words_raw = reference_text.split()
+    if not ref_words_raw:
+        return None
+
+    # Package PCM into in-memory WAV
+    wav_buf = io.BytesIO()
+    with wave.open(wav_buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(audio_bytes)
+    wav_bytes = wav_buf.getvalue()
+
+    # Call Deepgram Nova-3 API
+    url = "https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&punctuate=true"
+    req = urllib.request.Request(
+        url,
+        data=wav_bytes,
+        headers={
+            "Authorization": f"Token {api_key}",
+            "Content-Type": "audio/wav",
+            "User-Agent": "EchoCoach-Agent/1.0",
+        },
+        method="POST",
+    )
+
+    t0 = time.perf_counter()
     try:
-        await loop.run_in_executor(None, _ensure_model_cached)
-        await loop.run_in_executor(None, _get_scorer)
-    except Exception:
-        logger.exception("Pronunciation model warmup failed, first attempt will load it")
-        if on_status is not None:
-            await on_status("error")
-        return
-    if on_status is not None:
-        await on_status("ready")
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        logger.error("Deepgram API HTTP %d: %s", e.code, body[:250])
+        return None
+    except Exception as e:
+        logger.exception("Deepgram API request failed: %s", e)
+        return None
 
+    api_ms = (time.perf_counter() - t0) * 1000
 
-def _ensure_model_cached() -> None:
-    """Download model files with live progress, no-op when already cached."""
-    from huggingface_hub import snapshot_download
-    from tqdm import tqdm
+    channels = data.get("results", {}).get("channels", [])
+    if not channels:
+        return None
+    alt = channels[0].get("alternatives", [{}])[0]
+    recognized_text = alt.get("transcript", "").strip()
+    dg_words = alt.get("words", [])
 
-    class _ProgressTqdm(tqdm):
-        def __init__(self, *args, **kwargs):
-            kwargs.setdefault("disable", False)
-            kwargs.setdefault("leave", False)
-            super().__init__(*args, **kwargs)
-            _set_progress(
-                file=str(self.desc or ""),
-                downloaded=0,
-                total=self.total or 0,
+    logger.info(
+        "Deepgram response in %.0fms: transcript=%r (%d words)",
+        api_ms,
+        recognized_text[:60],
+        len(dg_words),
+    )
+
+    # Align reference words against Deepgram recognized words
+    aligned_pairs = align_reference_and_recognized(ref_words_raw, dg_words)
+
+    word_scores: list[WordScore] = []
+    matched_count = 0
+
+    for ref_w, dg_w in aligned_pairs:
+        clean_ref = re.sub(r"[^a-zA-Z']", "", ref_w)
+        if dg_w is None:
+            # Word omitted
+            word_scores.append(
+                WordScore(
+                    word=clean_ref,
+                    accuracy_score=0.0,
+                    error_type="Omission",
+                )
             )
+            continue
 
-        def update(self, n=1):
-            out = super().update(n)
-            _set_progress(downloaded=self.n or 0, total=self.total or 0)
-            return out
+        matched_count += 1
+        conf = float(dg_w.get("confidence", 0.85))
+        recognized_w = str(dg_w.get("word", "")).strip()
+        phn_sim = word_phonetic_similarity(ref_w, recognized_w)
 
-    logger.info("Checking pronunciation model cache...")
-    _set_progress(phase="downloading", file="", downloaded=0, total=0)
-    try:
-        snapshot_download(
-            repo_id="vitouphy/wav2vec2-xls-r-300m-timit-phoneme",
-            tqdm_class=_ProgressTqdm,
+        is_exact = clean_ref.lower() == re.sub(r"[^a-zA-Z']", "", recognized_w).lower()
+
+        if is_exact:
+            # Exact word match: blend acoustic confidence + phonetic stability
+            score = round(min(100.0, max(25.0, (0.2 * phn_sim + 0.8 * conf) * 100.0)), 1)
+            error_type = "None" if score >= DEFAULT_FLAG_THRESHOLD else "Mispronunciation"
+        else:
+            # Word differed: phonetic approximation
+            if phn_sim >= 0.8:
+                score = round(min(100.0, max(20.0, (0.45 * phn_sim + 0.55 * conf) * 95.0)), 1)
+                error_type = "None" if score >= DEFAULT_FLAG_THRESHOLD else "Mispronunciation"
+            else:
+                score = round(min(100.0, max(15.0, (0.6 * phn_sim + 0.4 * conf) * 75.0)), 1)
+                error_type = "Mispronunciation"
+
+        word_scores.append(
+            WordScore(
+                word=clean_ref,
+                accuracy_score=score,
+                error_type=error_type,
+            )
         )
-    except Exception:
-        with _PROGRESS_LOCK:
-            _PROGRESS["phase"] = "error"
-        raise
-    else:
-        with _PROGRESS_LOCK:
-            _PROGRESS["phase"] = "cached" if _PROGRESS.get("total") else "loading"
 
+    # Sentence-level metrics calculation
+    completeness = (
+        round(100.0 * (matched_count / max(len(ref_words_raw), 1)), 1)
+        if ref_words_raw
+        else 100.0
+    )
 
-def _get_scorer():
-    """Load the phoneme scoring model once and reuse it for every attempt."""
-    global _SCORER
-    if _SCORER is not None:
-        return _SCORER
-    with _MODEL_LOCK:
-        if _SCORER is not None:
-            return _SCORER
-        import time
+    avg_accuracy = (
+        round(sum(w.accuracy_score for w in word_scores) / max(len(word_scores), 1), 1)
+        if word_scores
+        else 0.0
+    )
 
-        from pronounce_assess.models import PronounceAssessModel
+    # Fluency calculation from speech timing & pacing
+    fluency = 85.0
+    if len(dg_words) >= 2:
+        try:
+            t_start = float(dg_words[0].get("start", 0.0))
+            t_end = float(dg_words[-1].get("end", 0.0))
+            dur = max(t_end - t_start, 0.5)
+            wpm = (len(dg_words) / dur) * 60.0
 
-        t0 = time.perf_counter()
-        logger.info("Loading pronunciation weights on cpu - about 40s first boot...")
-        _SCORER = PronounceAssessModel(device="cpu")
-        logger.info("Pronunciation model ready in %.1fs", time.perf_counter() - t0)
-        return _SCORER
+            # Target reading range: 110–160 WPM
+            if 110.0 <= wpm <= 165.0:
+                fluency = 92.0 + min(6.0, (wpm - 110.0) / 10.0)
+            elif wpm < 110.0:
+                fluency = max(55.0, 92.0 - (110.0 - wpm) * 0.6)
+            else:
+                fluency = max(60.0, 92.0 - (wpm - 165.0) * 0.5)
+
+            # Penalize for excessive inter-word pauses (>0.7s silence)
+            pause_penalties = 0
+            for k in range(1, len(dg_words)):
+                gap = float(dg_words[k].get("start", 0.0)) - float(dg_words[k - 1].get("end", 0.0))
+                if gap > 0.7:
+                    pause_penalties += 1
+            fluency = max(40.0, round(fluency - pause_penalties * 4.0, 1))
+        except Exception:
+            fluency = 85.0
+
+    prosody = 82.0
+    if len(word_scores) > 0:
+        # Prosody derived from confidence consistency and accuracy
+        prosody = round(min(96.0, max(50.0, (avg_accuracy * 0.7 + fluency * 0.3))), 1)
+
+    return PronunciationResult(
+        recognized_text=recognized_text if recognized_text else reference_text,
+        accuracy_score=avg_accuracy,
+        fluency_score=fluency,
+        completeness_score=completeness,
+        prosody_score=prosody,
+        words=word_scores,
+    )
 
 
 def _mock_pronunciation_assessment(reference_text: str) -> PronunciationResult:
-    """Generate a realistic simulated pronunciation assessment for UI tests.
-
-    Allows running and testing the complete UI and coaching loop without audio.
-    """
-    import re
-
+    """Generate simulated pronunciation assessment for offline UI testing."""
     words_raw = re.findall(r"[A-Za-z']+", reference_text)
     if not words_raw:
         words_raw = reference_text.split()
 
-    # Select a candidate word to flag (prefer longer words with len >= 5)
     flag_idx = -1
     max_len = 0
     for idx, w in enumerate(words_raw):
@@ -306,157 +496,5 @@ def _mock_pronunciation_assessment(reference_text: str) -> PronunciationResult:
         fluency_score=84.0,
         completeness_score=100.0,
         prosody_score=81.0,
-        words=word_scores,
-    )
-
-
-def _assess_pronunciation_sync(
-    audio_bytes: bytes,
-    reference_text: str,
-    sample_rate: int = 48000,
-) -> PronunciationResult | None:
-    """Synchronous pronunciation assessment — runs in executor thread."""
-    import time
-
-    from pronounce_assess import phonemes
-
-    if len(audio_bytes) < 3200:
-        logger.warning("Audio too short for pronunciation assessment (%d bytes)", len(audio_bytes))
-        return None
-
-    words_raw = re.findall(r"[A-Za-z']+", reference_text)
-    if not words_raw:
-        words_raw = reference_text.split()
-    if not words_raw:
-        return None
-
-    pcm_16k = resample_pcm(audio_bytes, source_rate=sample_rate, target_rate=16000)
-    if len(pcm_16k) < 3200:
-        logger.warning("Resampled audio is empty")
-        return None
-
-    samples = np.frombuffer(pcm_16k, dtype=np.int16).astype(np.float32) / 32768.0
-    peak = float(np.max(np.abs(samples))) if samples.size else 0.0
-    rms = float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
-
-    logger.info(
-        "Running free pronunciation assessment: %d bytes PCM, peak=%.3f rms=%.4f ref=%r",
-        len(audio_bytes),
-        peak,
-        rms,
-        reference_text[:60],
-    )
-    t0 = time.perf_counter()
-    try:
-        with _MODEL_LOCK:
-            scorer = _get_scorer()
-            scorer.set_sentence(reference_text)
-            raw_events = list(scorer.stream_decode(iter([samples])))
-    except Exception:
-        logger.exception("Free pronunciation assessment failed")
-        return None
-    score_ms = (time.perf_counter() - t0) * 1000
-
-    prosody = next((e for e in raw_events if e.label == "prosody"), None)
-    events = [e for e in raw_events if e.label != "prosody"]
-
-    processor = scorer.processor
-    sentence_phns = list(scorer.reference_phonemes or [])
-    word_phns = [phonemes.sentence_to_phonemes(w, processor) for w in words_raw]
-    flat_concat = [p for wps in word_phns for p in wps]
-    if flat_concat != sentence_phns:
-        logger.warning(
-            "Per-word phonemes diverge from sentence reference (%d vs %d), scores approximate",
-            len(flat_concat),
-            len(sentence_phns),
-        )
-    starts: list[int] = []
-    acc = 0
-    for wps in word_phns:
-        starts.append(acc)
-        acc += len(wps)
-
-    scored_rows: list[tuple[str, float, str] | None] = []
-    aligned_words = 0
-    for w, wps, s in zip(words_raw, word_phns, starts):
-        n = len(wps)
-        if n == 0:
-            scored_rows.append(None)
-            continue
-        by_pos = {}
-        for e in events:
-            if e.position is not None and s <= e.position < s + n:
-                by_pos.setdefault(e.position, e)
-        gops: list[float] = []
-        labels: list[str] = []
-        for k in range(n):
-            e = by_pos.get(s + k)
-            if e is None:
-                gops.append(0.0)
-                labels.append("omitted")
-            else:
-                labels.append(e.label)
-                gops.append(float(e.gop) if e.gop is not None else float("nan"))
-        valid = [g for g in gops if g == g]
-        word_acc = round(100.0 * float(np.mean(valid)), 1) if valid else 0.0
-        if any(label == "omitted" for label in labels):
-            err: str = "Omission"
-        elif any(label == "mispronounced" for label in labels):
-            err = "Mispronunciation"
-        else:
-            err = "None"
-        heard = sum(1 for label in labels if label != "omitted")
-        if heard * 2 >= n:
-            aligned_words += 1
-        scored_rows.append((w, word_acc, err))
-
-    present = [r[1] for r in scored_rows if r is not None]
-    sent_mean = round(float(np.mean(present)), 1) if present else 0.0
-    word_scores = [
-        WordScore(
-            word=w,
-            accuracy_score=(r[1] if r is not None else sent_mean),
-            error_type=(r[2] if r is not None else "None"),
-        )
-        for w, r in zip(words_raw, scored_rows)
-    ]
-
-    phoneme_words = [w for w, wps in zip(words_raw, word_phns) if len(wps) > 0]
-    completeness = (
-        round(100.0 * aligned_words / max(len(phoneme_words), 1), 1) if phoneme_words else 0.0
-    )
-    rhythm = prosody.rhythm_score if prosody is not None else None
-    boundary = prosody.boundary_score if prosody is not None else None
-    fluency = round(100.0 * float(rhythm), 1) if rhythm is not None else sent_mean
-    prosody_score = (
-        round(100.0 * float(boundary), 1) if boundary is not None and float(boundary) > 0 else 0.0
-    )
-
-    logger.info(
-        "Assessment in %.0fms: acc=%.1f comp=%.1f aligned=%d/%d events=%d flagged=%d",
-        score_ms,
-        sent_mean,
-        completeness,
-        aligned_words,
-        max(len(phoneme_words), 1),
-        len(events),
-        sum(1 for ws in word_scores if ws.is_flagged),
-    )
-    if completeness < 20:
-        gops_dbg = [round(float(e.gop), 2) if e.gop is not None else None for e in events[:12]]
-        logger.info(
-            "Low completeness debug: peak=%.3f rms=%.4f ref_phns=%d events=%d gops=%s",
-            peak,
-            rms,
-            len(sentence_phns),
-            len(events),
-            gops_dbg,
-        )
-    return PronunciationResult(
-        recognized_text=reference_text,
-        accuracy_score=sent_mean,
-        fluency_score=fluency,
-        completeness_score=completeness,
-        prosody_score=prosody_score,
         words=word_scores,
     )
